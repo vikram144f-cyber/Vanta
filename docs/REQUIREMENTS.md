@@ -28,6 +28,8 @@ M3 implements and tests the read-only retrieval path for F3 and B1, and exercise
 
 M4 implements the selection-scoped path for F1 and F4, and exercises native TrueForge approval for the B4 review requirement. [Task A and safety evidence](M4_VERIFICATION.md).
 
+M5 implements existing-file Agent Mode, with separate TrueForge gates for patch review and a pytest profile. Local and live evidence for MCP-03, TF-04, DEMO-B and DEMO-GENERIC is tracked in the [M5 verification report](M5_VERIFICATION.md).
+
 | ID | Requirement and PDF page | Delivery and verification |
 | --- | --- | --- |
 | D1 | Pinned `pallets/flask` tag `3.1.3`, commit `22d92470`. Task A uses `get_debug_flag`, handles `off` and `n` case-insensitively and lists every false value (pp. 4–5). | M4/M8. DEMO-A uses PDF wording, native review and an on-screen `False` check. |

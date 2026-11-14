@@ -1,6 +1,6 @@
 # VANTA
 
-VANTA is a desktop VS Code extension that streams a local TrueForge agent into Agent Studio. It supports read-only workspace discovery and Quick Edit with native diff review, per-hunk decisions and undo.
+VANTA is a desktop VS Code extension that streams a local TrueForge agent into Agent Studio. It supports workspace discovery, Quick Edit and multi-file Agent Mode with native diff review and per-hunk decisions.
 
 ## Run on Windows
 
@@ -53,3 +53,7 @@ Enable **Share workspace context** for a turn to allow read-only search, symbol 
 ## Quick Edit
 
 Select a code region in a trusted local file and press **Ctrl+Alt+I** on Windows or choose **VANTA: Quick Edit** from the editor context menu. Enter the instruction and review the native diff. Accept or reject each hunk in Agent Studio, then apply the accepted changes. Use **Ctrl+S** to save and **Ctrl+Z** in the source editor to undo. See the [Quick Edit guide](docs/QUICK_EDIT.md).
+
+## Agent Mode
+
+Set **VANTA: Verification Python** to an absolute path to a trusted interpreter with pytest and project dependencies. Check **Agent Mode** and **Share workspace context** in Studio. Review the proposed files and hunks, approve the separate pytest run, then save the applied buffers in VS Code. See the [Agent Mode guide](docs/AGENT_MODE.md) and [M5 verification report](docs/M5_VERIFICATION.md).

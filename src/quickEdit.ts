@@ -3,7 +3,7 @@ import { basename } from 'node:path';
 import { estimateContext } from './context';
 import { workspaceRepository, workspaceScope } from './editorRepository';
 import { applyHunks, assertBase, fingerprint } from './quickPatch';
-import type { BaseSelection, QuickPatch } from './quickPatch';
+import type { BaseSelection, Hunk } from './quickPatch';
 import { maxFileBytes, normalizeWorkspacePath, Repository } from './repository';
 import { safeError, VantaError } from './trueforge';
 import type { QuickEditTarget, StudioSession } from './session';
@@ -33,23 +33,25 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
     return (uri.query === 'proposed' ? text?.after : text?.before) ?? '';
   }
 
-  async #preview(patch: QuickPatch, hunkId: number) {
+  async previewChanges(id: string, patch: { base: BaseSelection; hunks: Hunk[] }, hunkId: number, mode: string) {
     const filename = basename(patch.base.path);
-    const uri = vscode.Uri.from({ scheme, authority: patch.id, path: `/${filename}` });
+    const uri = vscode.Uri.from({ scheme, authority: id, path: `/${filename}` });
     const proposed = uri.with({ query: 'proposed' });
-    if (!this.#values.has(patch.id)) {
-      this.#values.set(patch.id, { before: patch.base.text, after: applyHunks(patch.base, patch.hunks) });
-      if (this.#values.size > 6) this.#values.delete(this.#values.keys().next().value!);
-      await vscode.commands.executeCommand('vscode.diff', uri, proposed, `VANTA Quick Edit · ${filename}`, { preview: true });
+    if (!this.#values.has(id)) {
+      this.#values.set(id, { before: patch.base.text, after: applyHunks(patch.base, patch.hunks) });
+      if (this.#values.size > 16) this.#values.delete(this.#values.keys().next().value!);
+    }
+    if (!vscode.window.visibleTextEditors.some((editor) => editor.document.uri.toString() === proposed.toString())) {
+      await vscode.commands.executeCommand('vscode.diff', uri, proposed, `VANTA ${mode} · ${filename}`, { preview: true });
       await vscode.commands.executeCommand('vanta.studio.focus');
     }
     const hunk = patch.hunks.find((item) => item.id === hunkId);
     if (!hunk) return;
-    const shift = patch.hunks.slice(0, hunkId - 1).reduce((sum, item) => sum + item.replacement.length - (item.end - item.start), 0);
+    const shift = patch.hunks.slice(0, patch.hunks.indexOf(hunk)).reduce((sum, item) => sum + item.replacement.length - (item.end - item.start), 0);
     for (const editor of vscode.window.visibleTextEditors) {
       if (editor.document.uri.toString() === proposed.toString()) {
         // Virtual documents use VS Code's configured EOL, so navigate by line and column.
-        const prefix = this.#values.get(patch.id)!.after.slice(0, hunk.start + shift).split(/\r\n|\n/);
+        const prefix = this.#values.get(id)!.after.slice(0, hunk.start + shift).split(/\r\n|\n/);
         const position = editor.document.validatePosition(new vscode.Position(prefix.length - 1, prefix.at(-1)!.length));
         editor.selection = new vscode.Selection(position, position);
         editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
@@ -105,7 +107,7 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
       symbols: symbols.filter((symbol) => symbol.start <= end.line + 1 && symbol.end >= start.line + 1).slice(0, 8) });
     if (estimateContext(evidence) > Math.floor(this.contextBudget() / 2)) throw new VantaError('Select a smaller region to fit the Quick Edit context budget.');
     await verify(deadline);
-    return { base, evidence, verify, preview: (patch, hunk) => this.#preview(patch, hunk),
+    return { base, evidence, verify, preview: (patch, hunk) => this.previewChanges(patch.id, patch, hunk, 'Quick Edit'),
       apply: async (hunks, digest, signal, beginCommit) => {
         const visible = vscode.window.visibleTextEditors.find((item) => item.document === document && item.document.uri.scheme === 'file');
         const target = visible && vscode.window.activeTextEditor === visible ? visible

@@ -77,7 +77,8 @@ export class ContextEngine {
   #spent = 0;
   readonly #seen = new Map<string, Location[]>();
 
-  constructor(readonly repository: Repository, readonly budget: number, private readonly publish: (report: ContextReport) => void) {}
+  constructor(readonly repository: Repository, readonly budget: number, private readonly publish: (report: ContextReport) => void,
+    private readonly bundleFraction = 0.6) {}
 
   #emit(operation: string, hits: ContextHit[], items: unknown[], limit: number, limited = false, backend?: string) {
     const output: unknown[] = [];
@@ -265,7 +266,7 @@ export class ContextEngine {
     const top = fresh.slice(0, 12);
     const hits: ContextHit[] = top.map(({ path, start, end, reason, symbol, selected }) => ({ path, start, end, reason, symbol, selected }));
     const payload = top.map((hit) => ({ ...snippet(hit.path, hit.file, hit.start, hit.end), reason: hit.reason, symbol: hit.symbol }));
-    const output = this.#emit('Context bundle', hits, payload, Math.floor(this.budget * 0.6), limited || fresh.length > top.length, backend);
+    const output = this.#emit('Context bundle', hits, payload, Math.floor(this.budget * this.bundleFraction), limited || fresh.length > top.length, backend);
     for (const hit of hits.filter((item) => item.selected)) this.#seen.set(hit.path, [...(this.#seen.get(hit.path) ?? []), hit]);
     return output;
   }

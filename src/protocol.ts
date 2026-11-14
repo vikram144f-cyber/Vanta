@@ -28,6 +28,7 @@ export interface Approval {
 }
 
 export type Phase = 'idle' | 'starting' | 'streaming' | 'approval' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
+type HunkSummary = { id: number; line: number; status: 'pending' | 'accepted' | 'rejected' };
 
 export interface StudioState {
   connection: Connection;
@@ -39,13 +40,16 @@ export interface StudioState {
   error?: string;
   context?: ContextReport[];
   quickEdit?: boolean;
+  agentMode?: boolean;
+  changes?: { paths: string[]; status: 'applied' | 'undone' };
+  verification?: { command: string; status: 'awaiting approval' | 'running' | 'passed' | 'failed' | 'timed out' | 'cancelled' | 'denied'; exitCode?: number | null; output?: string };
   review?: { id: string; path: string; explanation: string; current: number;
-    hunks: { id: number; line: number; status: 'pending' | 'accepted' | 'rejected' }[] };
+    hunks: HunkSummary[]; files?: { path: string; summary: string; hunks: HunkSummary[] }[] };
 }
 
 export type StudioAction =
-  | { type: 'ready' | 'refreshConnection' | 'cancelRun' | 'clearConversation' | 'pickReference' }
-  | { type: 'submitPrompt'; text: string; shareContext?: boolean }
+  | { type: 'ready' | 'refreshConnection' | 'cancelRun' | 'clearConversation' | 'pickReference' | 'undoAgent' }
+  | { type: 'submitPrompt'; text: string; shareContext?: boolean; agentMode?: boolean }
   | { type: 'selectModel'; model: string }
   | { type: 'openContext'; path: string; line: number }
   | { type: 'reviewHunk'; id: string; hunk: number; decision: 'accepted' | 'rejected' | 'view' }
@@ -63,10 +67,12 @@ export function parseStudioAction(value: unknown): StudioAction | undefined {
     case 'cancelRun':
     case 'clearConversation':
     case 'pickReference':
+    case 'undoAgent':
       return { type: value.type };
     case 'submitPrompt':
       if ('text' in value && typeof value.text === 'string' && value.text.length <= 12_000 && value.text.trim()) {
-        return { type: value.type, text: value.text.trim(), ...('shareContext' in value && value.shareContext === true ? { shareContext: true } : {}) };
+        return { type: value.type, text: value.text.trim(), ...('shareContext' in value && value.shareContext === true ? { shareContext: true } : {}),
+          ...('agentMode' in value && value.agentMode === true ? { agentMode: true } : {}) };
       }
       return;
     case 'openContext':

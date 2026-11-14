@@ -175,6 +175,26 @@ export class Repository {
     return this.#readBytes(path, signal, maxFileBytes);
   }
 
+  async snapshot(signal: AbortSignal, copy: (path: string, text: string) => Promise<void>) {
+    const catalog = await this.#collect(signal);
+    if (catalog.truncated) throw new VantaError('This workspace exceeds the file limit for verification.');
+    let size = 0;
+    for (const path of catalog.paths) {
+      signal.throwIfAborted();
+      const checked = await this.#checked(path, signal);
+      if (checked.info.size > maxFileBytes) continue;
+      let text;
+      try { text = await this.#readBytes(path, signal, maxFileBytes); }
+      catch (error) {
+        if (error instanceof TypeError || (error instanceof VantaError && error.message === 'File is too large or is binary.')) continue;
+        throw error;
+      }
+      size += Buffer.byteLength(text);
+      if (size > 16 * 1024 * 1024) throw new VantaError('The verification snapshot exceeds 16 MiB.');
+      await copy(path, text);
+    }
+  }
+
   relative(absolute: string): string | undefined {
     const path = relative(this.root, absolute).split(sep).join('/');
     return safeRelativePath(path) ? path : undefined;

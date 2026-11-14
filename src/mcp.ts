@@ -11,6 +11,14 @@ import type { WorkspaceScope } from './workspace';
 import type { ContextEngine } from './context';
 import { proposeTool, proposalSchema, reviewSchema, reviewTool } from './quickPatch';
 import type { QuickPatch, ReviewReceipt } from './quickPatch';
+import { reviewAgentSchema, reviewAgentTool, stageAgentSchema, stageAgentTool, verifyAgentSchema, verifyAgentTool } from './agentPatch';
+import type { AgentReceipt, FileProposal, ReviewReference } from './agentPatch';
+
+export interface AgentTools {
+  stage(proposal: FileProposal): Promise<unknown>;
+  review(reference: ReviewReference): AgentReceipt;
+  verify(target: string): Promise<unknown>;
+}
 
 export interface QuickTools {
   stage(replacement: string, explanation: string): QuickPatch;
@@ -23,19 +31,19 @@ export interface OverviewBridge extends Connector {
   close(): Promise<void>;
 }
 
-async function readJson(request: IncomingMessage): Promise<unknown> {
+async function readJson(request: IncomingMessage, limit: number): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const data of request) {
     const chunk = Buffer.from(data as Uint8Array);
     size += chunk.length;
-    if (size > 16_384) throw new VantaError('MCP body limit exceeded.');
+    if (size > limit) throw new VantaError('MCP body limit exceeded.');
     chunks.push(chunk);
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
 }
 
-export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSignal, name = `vanta-run-${randomUUID()}`, context?: ContextEngine, quick?: QuickTools): Promise<OverviewBridge> {
+export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSignal, name = `vanta-run-${randomUUID()}`, context?: ContextEngine, quick?: QuickTools, agent?: AgentTools): Promise<OverviewBridge> {
   signal.throwIfAborted();
   const overview = await bindOverview(scope);
   signal.throwIfAborted();
@@ -143,9 +151,31 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
         inputSchema: reviewSchema, annotations: readOnly,
       }, ({ proposalId }) => edit(() => quick.receipt(proposalId)));
     }
+    if (agent) {
+      const act = async (operation: () => unknown) => {
+        if (closed || signal.aborted || !scope.isAvailable()) return failure('The Agent Mode scope ended.');
+        try {
+          const result = await operation();
+          if (closed || signal.aborted || !scope.isAvailable()) return failure('The Agent Mode scope ended.');
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+        } catch (error) { return failure(error instanceof VantaError ? error.message : 'Agent Mode could not complete this operation.'); }
+      };
+      server.registerTool(stageAgentTool, {
+        description: 'Stage all changes for one existing file. Provide its exact relative path and unique verbatim old text anchors plus their replacements. No workspace writes.',
+        inputSchema: stageAgentSchema, annotations: readOnly,
+      }, (proposal) => act(() => agent.stage(proposal)));
+      server.registerTool(reviewAgentTool, {
+        description: 'Open native multi-file review with the latest proposal ID and revision. Return the receipt for selected hunks. Approval required.',
+        inputSchema: reviewAgentSchema, annotations: readOnly,
+      }, (reference) => act(() => agent.review(reference)));
+      server.registerTool(verifyAgentTool, {
+        description: 'Request approval to run pytest -q on one existing relative Python test file in a temporary copy with the approved changes. Returns command status and exit code.',
+        inputSchema: verifyAgentSchema,
+      }, ({ target }) => act(() => agent.verify(target)));
+    }
     response.once('close', () => { void server.close().catch(() => undefined); });
     void (async () => {
-      const body = await readJson(request);
+      const body = await readJson(request, agent ? 64 * 1024 : 16_384);
       await server.connect(transport);
       await transport.handleRequest(request, response, body);
     })().catch(() => {

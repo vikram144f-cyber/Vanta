@@ -7,6 +7,7 @@ import { StudioSession } from './session';
 import { TrueForgeClient } from './trueforge';
 import { workspaceRepository, workspaceScope } from './editorRepository';
 import { QuickEdit, quickEditScheme } from './quickEdit';
+import { editorAgent } from './editorAgent';
 
 function contextBudget() {
   return Math.max(2000, Math.min(16000, Math.floor(vscode.workspace.getConfiguration('vanta').get('contextBudget', 8000)) || 8000));
@@ -46,7 +47,8 @@ class StudioView implements vscode.WebviewViewProvider {
           if (this.session.state.connection.status !== 'connected') void this.session.refresh();
           break;
         case 'refreshConnection': void this.session.refresh(); break;
-        case 'submitPrompt': void this.session.submit(action.text, action.shareContext); break;
+        case 'submitPrompt': void this.session.submit(action.text, action.shareContext, undefined, action.agentMode); break;
+        case 'undoAgent': void this.session.undoAgent(); break;
         case 'selectModel': this.session.selectModel(action.model); break;
         case 'cancelRun': void this.session.cancel(); break;
         case 'clearConversation': this.session.clear(); break;
@@ -103,7 +105,7 @@ async function pickReference(webview: vscode.Webview) {
 let session: StudioSession | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
-  const studio = new StudioSession({
+  const studio: StudioSession = new StudioSession({
     settings: () => {
       const config = vscode.workspace.getConfiguration('vanta');
       return {
@@ -111,16 +113,18 @@ export function activate(context: vscode.ExtensionContext) {
         model: config.get('model', '').trim(),
         agentName: config.get('agentName', '').trim(),
         workspaceOverview: config.get('workspaceOverview', true),
+        verificationPython: config.get('verificationPython', '').trim(),
         contextBudget: contextBudget(),
       };
     },
     forge: (url) => new TrueForgeClient(url),
     scopeKey: () => workspaceScope()?.path ?? '',
     repository: workspaceRepository,
-    bridge: async (signal, name, context, quick) => {
+    agentWorkspace: () => editorAgent(quickEdit.previewChanges.bind(quickEdit)),
+    bridge: async (signal, name, context, quick, agent) => {
       const scope = workspaceScope();
       if (!scope) return;
-      return startOverviewBridge(scope, signal, name, context, quick);
+      return startOverviewBridge(scope, signal, name, context, quick, agent);
     },
   });
   session = studio;

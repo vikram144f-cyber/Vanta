@@ -55,6 +55,8 @@ select, textarea { width: 100%; }
 .approval { margin: 0 14px 8px; padding: 9px 10px; border: 1px solid var(--accent); border-radius: 6px; }
 .button-row { justify-content: flex-start; margin-top: 8px; flex-wrap: wrap; }
 .quick-review { overflow: auto; max-height: 44dvh; flex-shrink: 0; }
+.review-file h3 { margin: .5rem 0 .25rem; overflow-wrap: anywhere; }
+.verification-output { max-height: 14rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .quick-hunks { list-style: none; padding: 0; margin: 6px 0; }
 .quick-hunks li { padding: 4px 0; border-bottom: 1px solid var(--line); }
 .quick-hunks [aria-pressed=true], .quick-hunks [aria-current=true] { border-color: var(--accent); }

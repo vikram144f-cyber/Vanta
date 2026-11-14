@@ -12,6 +12,7 @@ function Studio() {
   const [state, setState] = useState<StudioState>();
   const [draft, setDraft] = useState('');
   const [shareContext, setShareContext] = useState(false);
+  const [agentMode, setAgentMode] = useState(false);
   const log = useRef<HTMLElement>(null);
   const atBottom = useRef(true);
   const prompt = useRef<HTMLTextAreaElement>(null);
@@ -35,14 +36,15 @@ function Studio() {
   const { connection, messages, activity, phase, approval, sessionId, error } = state;
   const review = state.review;
   const busy = isBusy(phase);
-  const canSend = !busy && connection.status === 'connected' && !!(connection.selectedModel || connection.agentName);
+  const canSend = !busy && connection.status === 'connected' && !!(connection.selectedModel || (!agentMode && connection.agentName))
+    && (!agentMode || shareContext);
   const status = phase === 'approval' ? 'Waiting for approval' : phase === 'cancelling' ? 'Cancelling'
     : phase === 'streaming' ? 'Model generating' : phase === 'starting' ? 'Starting session' : '';
 
   function send() {
     if (!canSend || !draft.trim()) return;
     atBottom.current = true;
-    host.postMessage({ type: 'submitPrompt', text: draft, shareContext });
+    host.postMessage({ type: 'submitPrompt', text: draft, shareContext, agentMode });
     setDraft('');
     setShareContext(false);
   }
@@ -103,27 +105,29 @@ function Studio() {
       </div>
     </section>}
 
-    {review && <section className="approval quick-review" aria-label="Quick Edit review">
-      <h2>Review Quick Edit</h2>
-      <p>{review.path} · {review.explanation}</p>
+    {review && <section className="approval quick-review" aria-label={review.files ? 'Agent Mode review' : 'Quick Edit review'}>
+      <h2>{review.files ? 'Review Agent changes' : 'Review Quick Edit'}</h2>
+      {review.files ? <p>Accepting part of a patch can break related changes.</p> : <p>{review.path} · {review.explanation}</p>}
       <p>{review.hunks.filter((hunk) => hunk.status === 'pending').length} pending</p>
       <div className="button-row">
         <button type="button" disabled={review.current <= 1} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: review.current - 1, decision: 'view' })}>Previous hunk</button>
         <button type="button" disabled={review.current >= review.hunks.length} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: review.current + 1, decision: 'view' })}>Next hunk</button>
       </div>
-      <ol className="quick-hunks">{review.hunks.map((hunk) => <li key={hunk.id}>
+      {(review.files ?? [{ path: review.path, summary: '', hunks: review.hunks }]).map((file) => <div className="review-file" key={file.path}>
+      {review.files && <><h3>{file.path}</h3><p>{file.summary}</p></>}
+      <ol className="quick-hunks">{file.hunks.map((hunk) => <li key={hunk.id}>
         <button type="button" className="subtle" aria-current={review.current === hunk.id ? 'true' : undefined}
           onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: hunk.id, decision: 'view' })}>Hunk {hunk.id} · line {hunk.line} · {hunk.status}</button>
         <div className="button-row">
           <button type="button" aria-label={`Accept hunk ${hunk.id}`} aria-pressed={hunk.status === 'accepted'} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: hunk.id, decision: 'accepted' })}>Accept</button>
           <button type="button" aria-label={`Reject hunk ${hunk.id}`} aria-pressed={hunk.status === 'rejected'} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: hunk.id, decision: 'rejected' })}>Reject</button>
         </div>
-      </li>)}</ol>
+      </li>)}</ol></div>)}
       <div className="button-row">
         <button type="button" disabled={!review.hunks.some((hunk) => hunk.status === 'pending')}
           onClick={() => host.postMessage({ type: 'rejectRemaining', id: review.id })}>Reject remaining</button>
         <button type="button" className="primary" disabled={review.hunks.some((hunk) => hunk.status === 'pending') || !review.hunks.some((hunk) => hunk.status === 'accepted')}
-          onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: true })}>Apply accepted changes</button>
+          onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: true })}>{review.files ? 'Approve selected hunks' : 'Apply accepted changes'}</button>
         <button type="button" onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: false })}>Discard proposal</button>
       </div>
     </section>}
@@ -157,9 +161,15 @@ function Studio() {
           </div>
         </>}
       </details>
-      {['Changes', 'Test Results'].map((label) => <details key={label}>
-        <summary>{label}</summary><p>Not available yet</p>
-      </details>)}
+      {state.changes && <details open><summary>Changes</summary>
+        <p>{state.changes.status === 'applied' ? 'Applied to editor buffers. Save in VS Code to persist changes.' : 'Undone in editor buffers.'}</p>
+        <ul>{state.changes.paths.map((path) => <li key={path}>{path}</li>)}</ul>
+        {state.changes.status === 'applied' && <button type="button" disabled={busy} onClick={() => host.postMessage({ type: 'undoAgent' })}>Undo Agent changes</button>}
+      </details>}
+      {state.verification && <details open><summary>Test Results</summary>
+        <p><code>{state.verification.command}</code> · {state.verification.status}{state.verification.exitCode != null && ` · exit ${state.verification.exitCode}`}</p>
+        {state.verification.output && <pre className="verification-output">{state.verification.output}</pre>}
+      </details>}
     </section>
 
     <form className="composer" onSubmit={submit}>
@@ -167,12 +177,16 @@ function Studio() {
       <textarea id="prompt" ref={prompt} rows={3} maxLength={12_000} placeholder="Message VANTA…" value={draft}
         onChange={(event) => setDraft(event.currentTarget.value)} onKeyDown={onPromptKey} />
       <div className="composer-context">
+        <label title="Discover, stage, review and verify changes across existing files">
+          <input type="checkbox" checked={agentMode} disabled={busy} onChange={(event) => setAgentMode(event.currentTarget.checked)} /> Agent Mode
+        </label>
         <label title="Share eligible filenames, symbols and snippets with TrueForge and its model for this turn">
           <input type="checkbox" checked={shareContext} disabled={busy} onChange={(event) => setShareContext(event.currentTarget.checked)} /> Share workspace context
         </label>
         <button type="button" className="subtle" disabled={busy} onClick={() => host.postMessage({ type: 'pickReference' })}>Add file…</button>
       </div>
-      {state.sessionId && <p className="muted context-note">{state.quickEdit ? 'Quick Edit uses a separate TrueForge session.' : 'Follow-ups can use context shared earlier in this conversation.'}</p>}
+      {state.sessionId && <p className="muted context-note">{state.agentMode ? 'Agent Mode uses a separate TrueForge session for each request.'
+        : state.quickEdit ? 'Quick Edit uses a separate TrueForge session.' : 'Follow-ups can use context shared earlier in this conversation.'}</p>}
       <div className="composer-footer">
         <button type="button" className="subtle" disabled={busy || !messages.length} onClick={() => {
           host.postMessage({ type: 'clearConversation' });

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import * as vscode from 'vscode';
+import { writeFile, readFile, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
 import { baseSelection } from '../../src/quickEdit';
 import { applyHunks, createHunks } from '../../src/quickPatch';
+import { editorAgent } from '../../src/editorAgent';
 
 export async function run() {
   const extension = vscode.extensions.getExtension('vikram144f-cyber.vanta');
@@ -40,5 +43,37 @@ export async function run() {
   });
   await Promise.all([vscode.commands.executeCommand('undo'), undo]);
   assert.equal(buffer.getText(), captured.text);
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  assert.ok(folder);
+  const repo = await editorAgent(async () => undefined);
+  assert.ok(repo, 'Expected a trusted local workspace');
+  const paths = ['agent-a.txt', 'agent-b.txt', 'agent-c.txt'];
+  const source = 'original\r\n';
+  const deadline = AbortSignal.timeout(15_000);
+  for (const path of paths) await writeFile(join(folder.uri.fsPath, path), source);
+  const approved = await Promise.all(paths.map(async (path) => ({ base: await repo.capture(path, deadline), after: 'reviewed\r\n', ids: [1] })));
+  let commits = 0;
+  const apply = () => repo.apply(approved, deadline, () => { commits++; });
+  const revert = await apply();
+  assert.equal(commits, 1);
+  const target = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, paths[0]!));
+  for (const path of paths) {
+    assert.equal((await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, path))).getText(), 'reviewed\r\n');
+    assert.equal(await readFile(join(folder.uri.fsPath, path), 'utf8'), source);
+  }
+  await revert();
+  assert.equal(target.getText(), source);
+  const dirty = new vscode.WorkspaceEdit();
+  dirty.insert(target.uri, new vscode.Position(0, 0), 'user edit\r\n');
+  assert.equal(await vscode.workspace.applyEdit(dirty), true);
+  await assert.rejects(repo.capture(paths[0]!, deadline), /clean/);
+  const removed = 'agent-removed.txt';
+  await writeFile(join(folder.uri.fsPath, removed), source);
+  const clean = await repo.capture(removed, deadline);
+  await unlink(join(folder.uri.fsPath, removed));
+  await assert.rejects(repo.apply([{ base: clean, after: 'change\r\n', ids: [1] }], deadline, () => { commits++; }));
+  assert.equal(commits, 1);
+  assert.match(target.getText(), /^user edit/);
+  console.log('Agent Mode text-only WorkspaceEdit applied and undid three CRLF buffers, preserved disk, and rejected dirty and deleted targets.');
   console.log('VANTA activated and all three extension commands executed in the Windows Extension Host.');
 }

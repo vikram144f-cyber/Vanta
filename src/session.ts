@@ -1,16 +1,42 @@
 import type { TrueForgeApi as Api } from '@truefoundry/trueforge-sdk';
 import { mergeEventDelta } from '@truefoundry/trueforge-sdk';
 import { randomUUID } from 'node:crypto';
-import type { OverviewBridge, QuickTools } from './mcp';
+import type { AgentTools, OverviewBridge, QuickTools } from './mcp';
 import { isBusy } from './protocol';
 import type { StudioState } from './protocol';
-import { inlineAgent, LoopbackConnectorBlocked, overviewToolName, safeError, VantaError } from './trueforge';
+import { agentModeDefinition, inlineAgent, LoopbackConnectorBlocked, overviewToolName, safeError, VantaError } from './trueforge';
 import type { Event, Forge } from './trueforge';
 import { ContextEngine, defaultBudget, estimateContext, parseMentions } from './context';
 import type { ContextReport } from './context';
 import type { Repository } from './repository';
 import { proposeTool, QuickPatch, reviewSchema, reviewTool } from './quickPatch';
 import type { BaseSelection, HunkEdit, ReviewReceipt } from './quickPatch';
+import { fingerprint } from './quickPatch';
+import { AgentPatch, reviewAgentSchema, reviewAgentTool, stageAgentTool, verifyAgentSchema, verifyAgentTool } from './agentPatch';
+import type { AgentReceipt, ReviewReference } from './agentPatch';
+import type { AgentWorkspace } from './agentWorkspace';
+import { pytestCommand, runPytest, verificationPython, verificationTarget } from './verification';
+
+interface Gate {
+  id: string;
+  acknowledged?: boolean;
+  confirmed?: boolean;
+}
+
+interface AgentRun {
+  workspace: AgentWorkspace;
+  scope: string;
+  python: string;
+  patch: AgentPatch;
+  discovered: Set<string>;
+  staging: number;
+  denied?: boolean;
+  committing?: boolean;
+  review?: Gate;
+  receipt?: AgentReceipt;
+  verification?: Gate & { target: string; grant?: string; result?: { digest: string; status: string; exitCode: number | null } };
+  checking?: { promise: Promise<unknown>; stop: AbortController };
+}
 
 export interface QuickEditTarget {
   base: BaseSelection;
@@ -38,14 +64,16 @@ export interface Settings {
   agentName: string;
   workspaceOverview: boolean;
   contextBudget?: number;
+  verificationPython?: string;
 }
 
 interface Dependencies {
   settings(): Settings;
   forge(url: string): Forge;
-  bridge(signal: AbortSignal, name?: string, context?: ContextEngine, quick?: QuickTools): Promise<OverviewBridge | undefined>;
+  bridge(signal: AbortSignal, name?: string, context?: ContextEngine, quick?: QuickTools, agent?: AgentTools): Promise<OverviewBridge | undefined>;
   repository?(): Promise<Repository | undefined>;
   scopeKey?(): string;
+  agentWorkspace?(): Promise<AgentWorkspace | undefined>;
 }
 
 interface Conversation { key: string; sessionId: string; connector?: string; lastTurnId?: string }
@@ -57,8 +85,8 @@ interface Run {
   sessionId?: string;
   turnId?: string;
   bridge?: OverviewBridge;
-  calls: Map<string, { name: string; sourceId: string; allowed: boolean; proposalId?: string }>;
-  approval?: { threadId: string; id: string; canAllow: boolean };
+  calls: Map<string, { name: string; sourceId: string; allowed: boolean; proposalId?: string; reference?: ReviewReference; target?: string }>;
+  approval?: { threadId: string; id: string; canAllow: boolean; name?: string };
   pauseCursor?: string;
   decision?: Promise<void>;
   releasePause?: () => void;
@@ -66,6 +94,7 @@ interface Run {
   finished?: Promise<void>;
   terminal?: 'completed' | 'cancelled' | 'failed';
   quick?: QuickRun;
+  agent?: AgentRun;
   toolMessages?: Map<string, Api.ModelMessageEvent>;
 }
 
@@ -81,6 +110,8 @@ export class StudioSession {
   #disposed = false;
   #nextRun = 0;
   #conversation?: Conversation;
+  #undo?: () => Promise<void>;
+  #undoing = false;
 
   constructor(private readonly dependencies: Dependencies) {}
 
@@ -140,7 +171,8 @@ export class StudioSession {
 
   async workspaceChanged() {
     this.#conversation = undefined;
-    this.#set({ context: [] });
+    this.#undo = undefined;
+    this.#set({ context: [], changes: undefined });
     await this.cancel();
   }
 
@@ -148,10 +180,10 @@ export class StudioSession {
     return this.state.context?.some((report) => report.hits.some((hit) => hit.path === path && hit.start === line)) ?? false;
   }
 
-  submit(prompt: string, shareContext = false, target?: QuickEditTarget): Promise<void> {
-    if (this.#disposed || this.#active || isBusy(this.state.phase)) return Promise.resolve();
+  submit(prompt: string, shareContext = false, target?: QuickEditTarget, agentMode = false): Promise<void> {
+    if (this.#disposed || this.#active || this.#undoing || isBusy(this.state.phase)) return Promise.resolve();
     const connection = this.state.connection;
-    if (connection.status !== 'connected' || (!connection.selectedModel && (!connection.agentName || target))) return Promise.resolve();
+    if (connection.status !== 'connected' || (!connection.selectedModel && (!connection.agentName || target || agentMode))) return Promise.resolve();
     const settings = this.dependencies.settings();
     let forge: Forge;
     try {
@@ -161,40 +193,50 @@ export class StudioSession {
       return Promise.resolve();
     }
     const run: Run = { id: ++this.#nextRun, forge, abort: new AbortController(), calls: new Map(),
-      quick: target ? { target } : undefined, toolMessages: target ? new Map() : undefined };
+      quick: target ? { target } : undefined, toolMessages: target || agentMode ? new Map() : undefined };
     this.#active = run;
     this.#set({
-      phase: 'starting', activity: [], context: [], error: undefined, review: undefined,
+      phase: 'starting', activity: [], context: [], error: undefined, review: undefined, verification: agentMode ? undefined : this.state.verification,
       messages: [...this.state.messages.slice(-39), { id: `user-${run.id}`, role: 'user', text: prompt }],
     });
-    run.finished = this.#execute(run, prompt, settings, shareContext, connection.selectedModel);
+    run.finished = this.#execute(run, prompt, settings, shareContext, connection.selectedModel, agentMode && !target);
     return run.finished;
   }
 
-  async #execute(run: Run, prompt: string, settings: Settings, shareContext: boolean, model?: string) {
+  async #execute(run: Run, prompt: string, settings: Settings, shareContext: boolean, model: string | undefined, agentMode: boolean) {
     const signal = run.abort.signal;
     const quick = run.quick;
     try {
       const mentions = quick ? [] : parseMentions(prompt);
       const key = JSON.stringify([settings.serverUrl, model, settings.agentName, settings.workspaceOverview, this.dependencies.scopeKey?.()]);
-      const existing = !quick && this.#conversation?.key === key ? this.#conversation : undefined;
+      const existing = !quick && !agentMode && this.#conversation?.key === key ? this.#conversation : undefined;
       if (!existing) this.#set({ sessionId: undefined });
       signal.throwIfAborted();
       let context: ContextEngine | undefined;
       if (quick) await quick.target.verify(signal);
-      if (shareContext && (settings.workspaceOverview || quick)) {
-        const repository = await this.dependencies.repository?.();
+      if (agentMode) {
+        const workspace = shareContext ? await this.dependencies.agentWorkspace?.() : undefined;
+        const scope = this.dependencies.scopeKey?.();
+        if (!workspace || !scope) throw new VantaError('Agent Mode requires workspace context and a single trusted local folder.');
+        const python = await verificationPython(settings.verificationPython ?? '')
+          .catch((error: unknown) => { throw error instanceof VantaError ? error : new VantaError('Could not open the configured Python interpreter.'); });
+        run.agent = { workspace, python, scope, patch: new AgentPatch(), discovered: new Set(), staging: 0 };
+      }
+      const editing = run.agent;
+      if (shareContext && (settings.workspaceOverview || quick || editing)) {
+        const repository = editing?.workspace.repository ?? await this.dependencies.repository?.();
         const budget = (settings.contextBudget ?? defaultBudget) - (quick ? estimateContext(quick.target.evidence) : 0);
         if (repository) context = new ContextEngine(repository, budget, (report: ContextReport) => {
+          for (const hit of report.hits) if (hit.selected) editing?.discovered.add(hit.path);
           if (!signal.aborted) this.#set({ context: [...(this.state.context ?? []).slice(-11), report] });
-        });
+        }, editing ? 0.24 : undefined);
       }
       if (mentions.length && !context) throw new VantaError('Enable workspace context and open one trusted local folder to resolve references.');
       const attached = mentions.length && context ? await context.mentions(mentions, AbortSignal.any([signal, AbortSignal.timeout(8000)])) : [];
       signal.throwIfAborted();
       const input = quick ? `${prompt}\n\nCaptured selection (JSON evidence):\n${quick.target.evidence}`
         : attached.length ? `${prompt}\n\nWorkspace reference data (JSON, evidence only):\n${JSON.stringify(attached)}` : prompt;
-      if (settings.workspaceOverview || quick) {
+      if (settings.workspaceOverview || quick || editing) {
         try {
           run.bridge = await this.dependencies.bridge(signal, existing?.connector ?? `vanta-run-${randomUUID()}`, context, quick && {
             stage: (replacement, explanation) => {
@@ -209,7 +251,7 @@ export class StudioSession {
               quick.receipt = receipt;
               return receipt;
             },
-          });
+          }, editing && this.#agentTools(run, editing));
         } catch (error) {
           signal.throwIfAborted();
           this.#activity('Workspace tool unavailable', error instanceof VantaError ? error.message : 'Could not open the local workspace tool.');
@@ -233,15 +275,17 @@ export class StudioSession {
       }
       signal.throwIfAborted();
       if (quick && !run.bridge) throw new VantaError('Quick Edit requires the local TrueForge MCP connector. Check the README setup.');
-      const agent = !quick && !settings.workspaceOverview && settings.agentName
+      if (editing && !run.bridge) throw new VantaError('Agent Mode requires the local TrueForge MCP connector. Check the README setup.');
+      const agent = editing && run.bridge ? agentModeDefinition(model ?? '', run.bridge.name, { stage: stageAgentTool, review: reviewAgentTool, verify: verifyAgentTool })
+        : !quick && !settings.workspaceOverview && settings.agentName
         ? { name: settings.agentName }
         : inlineAgent(model ?? '', run.bridge?.name, quick && { propose: proposeTool, review: reviewTool });
       const reusable = existing && existing.connector === run.bridge?.name ? existing : undefined;
       run.sessionId = reusable?.sessionId ?? await run.forge.createSession(agent, AbortSignal.timeout(8000));
       signal.throwIfAborted();
       const conversation = reusable ?? { sessionId: run.sessionId, connector: run.bridge?.name, key };
-      if (!quick) this.#conversation = conversation;
-      this.#set({ sessionId: run.sessionId, quickEdit: !!quick });
+      if (!quick && !editing) this.#conversation = conversation;
+      this.#set({ sessionId: run.sessionId, quickEdit: !!quick, agentMode: !!editing });
       this.#activity(reusable ? 'Session resumed' : 'Session started');
       await this.#consume(run, run.forge.start(run.sessionId, input, signal, conversation.lastTurnId));
       if (!run.terminal && run.pauseCursor && run.turnId && run.releasePause) {
@@ -269,7 +313,23 @@ export class StudioSession {
           throw new VantaError('TrueForge did not complete an approved Quick Edit. The source was left unchanged.');
         }
       }
-      if (!quick && run.terminal === 'completed' && run.turnId) conversation.lastTurnId = run.turnId;
+      if (run.terminal === 'completed' && editing) {
+        if (editing.denied) this.#activity('Agent changes discarded');
+        else if (!editing.receipt || !editing.review?.confirmed || !editing.verification?.confirmed || editing.verification.result?.status !== 'passed') {
+          throw new VantaError('Agent Mode requires reviewed hunks, a passing verification receipt and a completed TrueForge turn.');
+        } else {
+          const files = editing.patch.approved(editing.receipt);
+          this.#undo = await editing.workspace.apply(files, signal, () => {
+            signal.throwIfAborted();
+            editing.committing = true;
+          });
+          if (this.dependencies.scopeKey?.() === editing.scope) {
+            this.#set({ changes: { paths: files.map(({ base }) => base.path), status: 'applied' } });
+          } else this.#undo = undefined;
+          this.#activity('Agent changes applied to buffers', files.map(({ base }) => base.path).join(', '));
+        }
+      }
+      if (!quick && !editing && run.terminal === 'completed' && run.turnId) conversation.lastTurnId = run.turnId;
       if (!run.terminal && !signal.aborted) throw new VantaError('The TrueForge stream ended before the turn completed. Check the session in TrueForge.');
     } catch (error) {
       if (!signal.aborted) {
@@ -278,8 +338,11 @@ export class StudioSession {
       }
     } finally {
       quick?.patch?.revoke();
+      run.agent?.patch.close();
       run.releasePause?.();
       if (!run.terminal && run.sessionId) await this.#cancelRemote(run);
+      run.agent?.checking?.stop.abort();
+      await run.agent?.checking?.promise.catch(() => undefined);
       if (run.bridge) {
         await run.bridge.close();
         try {
@@ -301,6 +364,54 @@ export class StudioSession {
       if (run.abort.signal.aborted || run.terminal) break;
       this.#map(run, event);
     }
+  }
+
+  #agentTools(run: Run, agent: AgentRun): AgentTools {
+    const signal = run.abort.signal;
+    return {
+      stage: async (proposal) => {
+        if (agent.staging >= 12 || agent.review || !agent.discovered.has(proposal.path)) {
+          throw new VantaError('Discover this file before staging it. Stage up to 12 files before review.');
+        }
+        agent.staging++;
+        try {
+          const base = await agent.workspace.capture(proposal.path, AbortSignal.any([signal, AbortSignal.timeout(6000)]));
+          signal.throwIfAborted();
+          if (agent.review) throw new VantaError('This proposal is already under review.');
+          const staged = agent.patch.stage(base, proposal);
+          this.#activity('Agent file staged', proposal.path);
+          return staged;
+        } catch (error) {
+          this.#activity('Agent staging rejected', error instanceof VantaError ? error.message : 'The target could not be captured.');
+          throw error;
+        } finally { agent.staging--; }
+      },
+      review: (reference) => agent.receipt = agent.patch.consume(reference),
+      verify: async (target) => {
+        const gate = agent.verification;
+        const receipt = agent.receipt;
+        if (!gate?.grant || target !== gate.target || !receipt || !agent.review?.confirmed || this.dependencies.scopeKey?.() !== agent.scope) {
+          throw new VantaError('Verification requires matching local approval for this target and patch.');
+        }
+        const digest = gate.grant;
+        gate.grant = undefined;
+        this.#set({ verification: { command: pytestCommand(target), status: 'running' } });
+        try {
+          const stop = new AbortController();
+          const checking = runPytest(agent.workspace.repository, agent.python, target, agent.patch.approved(receipt), AbortSignal.any([signal, stop.signal]));
+          agent.checking = { promise: checking, stop };
+          const result = await checking;
+          this.#set({ verification: result });
+          this.#activity('Verification finished', `${result.status} · exit ${result.exitCode ?? 'unavailable'}`);
+          // Keep test output local. Tests can emit data that pattern-based redaction misses.
+          return gate.result = { digest, status: result.status, exitCode: result.exitCode };
+        } catch (error) {
+          this.#set({ verification: { command: pytestCommand(target), status: signal.aborted ? 'cancelled' : 'failed',
+            exitCode: null, output: error instanceof VantaError ? error.message : 'Could not prepare or clean up the temporary snapshot.' } });
+          throw error;
+        } finally { agent.checking = undefined; }
+      },
+    };
   }
 
   #map(run: Run, event: Event) {
@@ -329,6 +440,7 @@ export class StudioSession {
         break;
       }
       case 'tool.approval_required': {
+        if (run.agent && event.threadId !== 'main') throw new VantaError('Unexpected Agent Mode approval thread.');
         const call = event.toolCalls[0];
         if (call && run.approval?.id === call.id) break;
         if (!call || event.toolCalls.length !== 1 || run.approval) {
@@ -336,7 +448,7 @@ export class StudioSession {
         }
         const source = run.calls.get(call.id);
         const canAllow = source?.allowed === true && source.sourceId === call.sourceEventId;
-        run.approval = { id: call.id, threadId: event.threadId, canAllow };
+        run.approval = { id: call.id, threadId: event.threadId, canAllow, name: source?.name };
         run.pauseCursor = event.id;
         run.decision = new Promise((resolve) => { run.releasePause = resolve; });
         if (run.quick && canAllow && run.quick.patch && source.proposalId === run.quick.patch.id && !run.quick.reviewed) {
@@ -355,6 +467,26 @@ export class StudioSession {
           break;
         }
         if (run.quick) throw new VantaError('TrueForge requested an invalid Quick Edit review. The source was left unchanged.');
+        if (run.agent) {
+          const agent = run.agent;
+          if (canAllow && source.name === reviewAgentTool && !agent.review && !agent.staging && agent.patch.matches(source.reference)) {
+            agent.review = { id: call.id };
+            this.#set({ phase: 'approval' });
+            this.#activity('Waiting for Agent Mode review', `${agent.patch.id} · revision ${agent.patch.reference.revision}`);
+            const file = agent.patch.files.values().next().value!;
+            void this.#previewAgent(run, agent, file.hunks[0]!.id);
+            break;
+          }
+          if (canAllow && source.name === verifyAgentTool && source.target && agent.review?.confirmed && !agent.verification) {
+            agent.verification = { id: call.id, target: source.target };
+            this.#set({ phase: 'approval', approval: { id: call.id, canAllow: true, label: 'Run approved pytest profile',
+              detail: `${pytestCommand(source.target)} · Temporary workspace with only the accepted edits. Python tests run with your account privileges.` },
+              verification: { command: pytestCommand(source.target), status: 'awaiting approval' } });
+            this.#activity('Waiting for verification approval', source.target);
+            break;
+          }
+          throw new VantaError('TrueForge requested an invalid or out-of-order Agent Mode approval.');
+        }
         this.#set({ phase: 'approval', approval: {
           id: call.id, canAllow, label: canAllow ? 'Read workspace overview' : 'Unrecognized tool request',
           detail: canAllow ? 'Share the workspace name and up to 100 top-level file and folder names with TrueForge and its model.'
@@ -374,11 +506,23 @@ export class StudioSession {
         if (run.quick?.approvalId === event.toolCallId && run.quick.receipt && run.quick.acknowledged) {
           run.quick.confirmed = event.content === JSON.stringify(run.quick.receipt);
         }
+        if (run.agent && event.threadId === 'main') {
+          const { review, receipt, verification } = run.agent;
+          if (review?.id === event.toolCallId && review.acknowledged && receipt) review.confirmed = event.content === JSON.stringify(receipt);
+          if (verification?.id === event.toolCallId && verification.acknowledged && verification.result) {
+            verification.confirmed = event.content === JSON.stringify(verification.result);
+          }
+        }
         this.#activity('Tool returned', run.calls.get(event.toolCallId)?.name);
         break;
       case 'user.tool_approval':
         if (run.quick?.approvalId === event.toolCallId && event.approval.status === 'allow' && run.quick.reviewed) {
           run.quick.acknowledged = true;
+        }
+        if (run.agent && event.threadId === 'main' && event.approval.status === 'allow') {
+          for (const gate of [run.agent.review, run.agent.verification]) {
+            if (gate?.id === event.toolCallId) gate.acknowledged = true;
+          }
         }
         break;
       case 'tool.response_required':
@@ -402,18 +546,30 @@ export class StudioSession {
       const info = call.toolInfo;
       if (!call.id || !info) continue;
       const direct = info.type === 'mcp' && !!run.bridge && info.serverName === run.bridge.name;
-      const name = direct && [overviewToolName, proposeTool, reviewTool].includes(info.name) ? info.name : info.type === 'truefoundry-system'
+      const name = direct && [overviewToolName, proposeTool, reviewTool, stageAgentTool, reviewAgentTool, verifyAgentTool, 'read_file', 'search_workspace'].includes(info.name) ? info.name : info.type === 'truefoundry-system'
         && ['list_tools', 'get_tool_info', 'call_tool', 'get_tool_output_schema'].includes(info.name) ? info.name : 'TrueForge tool';
       let proposalId: string | undefined;
+      let reference: ReviewReference | undefined;
+      let target: string | undefined;
       if (run.quick && direct && name === reviewTool && call.function?.arguments) {
         try {
           const args = reviewSchema.safeParse(JSON.parse(call.function.arguments));
           if (args.success) proposalId = args.data.proposalId;
         } catch { /* partial or invalid tool arguments */ }
       }
+      if (run.agent && direct && call.function?.arguments) {
+        try {
+          const args: unknown = JSON.parse(call.function.arguments);
+          if (name === reviewAgentTool) reference = reviewAgentSchema.parse(args);
+          if (name === verifyAgentTool) {
+            const candidate = verifyAgentSchema.parse(args).target;
+            if (verificationTarget(candidate) && run.agent.discovered.has(candidate)) target = candidate;
+          }
+        } catch { /* partial or invalid tool arguments */ }
+      }
       const previous = run.calls.get(call.id);
-      if (!previous || proposalId) run.calls.set(call.id, { name, sourceId, proposalId,
-        allowed: direct && (run.quick ? !!proposalId : name === overviewToolName) });
+      if (!previous || proposalId || reference || target) run.calls.set(call.id, { name, sourceId, proposalId, reference, target,
+        allowed: direct && (run.quick ? !!proposalId : run.agent ? !!(reference || target) : name === overviewToolName) });
       if (!previous) this.#activity('Tool requested', name);
     }
   }
@@ -434,10 +590,39 @@ export class StudioSession {
       hunks: patch.hunks.map(({ id, start, status }) => ({ id, line: patch.base.text.slice(0, start).split('\n').length, status })) } });
   }
 
+  #agentReview(agent: AgentRun, current: number) {
+    const files = [...agent.patch.files.values()].map(({ base, summary, hunks }) => ({ path: base.path, summary,
+      hunks: hunks.map(({ id, start, status }) => ({ id, line: base.text.slice(0, start).split('\n').length, status })) }));
+    this.#set({ review: { id: agent.patch.id, path: '', explanation: '', current, files, hunks: files.flatMap((file) => file.hunks) } });
+  }
+
+  async #previewAgent(run: Run, agent: AgentRun, id: number) {
+    const file = [...agent.patch.files.values()].find(({ hunks }) => hunks.some((hunk) => hunk.id === id));
+    if (!file) return;
+    try {
+      await agent.workspace.preview(agent.patch.id, file, id);
+      if (this.#active === run && run.approval?.id === agent.review?.id && !run.abort.signal.aborted) this.#agentReview(agent, id);
+    } catch {
+      if (this.#active === run && !run.abort.signal.aborted) {
+        this.#set({ error: 'Could not open the native Agent Mode diff.' });
+        await this.cancel();
+      }
+    }
+  }
+
   async reviewHunk(id: string, hunk: number, decision: 'accepted' | 'rejected' | 'view') {
     const run = this.#active;
     const quick = run?.quick;
     const patch = quick?.patch;
+    const agent = run?.agent;
+    if (run?.approval && agent && agent.patch.id === id && this.state.review?.id === id) {
+      const item = [...agent.patch.files.values()].flatMap((file) => file.hunks).find((item) => item.id === hunk);
+      if (!item) return;
+      if (decision !== 'view') item.status = decision;
+      this.#agentReview(agent, hunk);
+      await this.#previewAgent(run, agent, hunk);
+      return;
+    }
     if (!run?.approval || !quick || !patch || patch.id !== id || this.state.review?.id !== id || !patch.hunks.some((item) => item.id === hunk)) return;
     if (decision !== 'view') patch.decide(hunk, decision);
     this.#reviewSnapshot(patch, hunk);
@@ -450,6 +635,17 @@ export class StudioSession {
     const quick = run?.quick;
     const patch = quick?.patch;
     const approval = run?.approval;
+    const agent = run?.agent;
+    if (run && agent && approval && run.sessionId && run.turnId && approval.id === agent.review?.id
+      && agent.patch.id === id && this.state.review?.id === id) {
+      try {
+        if (apply) agent.patch.authorize({ workspace: agent.scope, session: run.sessionId, turn: run.turnId, call: approval.id });
+        else agent.patch.close();
+        this.#set({ review: undefined });
+        await this.#decide(approval.id, apply);
+      } catch (error) { this.#set({ error: safeError(error) }); }
+      return;
+    }
     if (!run || !quick || !patch || !approval || patch.id !== id || this.state.review?.id !== id || quick.reviewed) return;
     try {
       if (apply) {
@@ -470,13 +666,31 @@ export class StudioSession {
   rejectRemaining(id: string) {
     const patch = this.#active?.quick?.patch;
     const review = this.state.review;
+    const agent = this.#active?.agent;
+    if (agent?.patch.id === id && review?.id === id) {
+      for (const file of agent.patch.files.values()) for (const hunk of file.hunks) if (hunk.status === 'pending') hunk.status = 'rejected';
+      this.#agentReview(agent, review.current);
+      return;
+    }
     if (!patch || patch.id !== id || review?.id !== id) return;
     for (const hunk of patch.hunks) if (hunk.status === 'pending') patch.decide(hunk.id, 'rejected');
     this.#reviewSnapshot(patch, review.current);
   }
 
   async decide(id: string, allow: boolean) {
-    if (!this.#active?.quick) await this.#decide(id, allow);
+    const run = this.#active;
+    if (!run?.quick && run?.approval?.name !== reviewAgentTool) await this.#decide(id, allow);
+  }
+
+  async undoAgent() {
+    if (!this.#undo || this.#active || this.#undoing) return;
+    this.#undoing = true;
+    try {
+      await this.#undo();
+      this.#undo = undefined;
+      if (this.state.changes) this.#set({ changes: { ...this.state.changes, status: 'undone' }, error: undefined });
+    } catch (error) { this.#set({ error: safeError(error) }); }
+    finally { this.#undoing = false; }
   }
 
   async #decide(id: string, allow: boolean) {
@@ -484,15 +698,25 @@ export class StudioSession {
     const approval = run?.approval;
     if (!run?.sessionId || !run.turnId || !approval || id !== approval.id || (allow && !approval.canAllow) || run.abort.signal.aborted) return;
     const releasePause = run.releasePause;
+    const agent = run.agent;
+    if (agent) {
+      if (!allow) agent.denied = true;
+      const gate = agent.verification;
+      if (allow && approval.name === verifyAgentTool && gate && agent.receipt) {
+        gate.grant = fingerprint(JSON.stringify([agent.scope, agent.python, run.sessionId, run.turnId, approval.id,
+          agent.receipt.digest, 'pytest', [gate.target, '-q'], 'temporary snapshot root']));
+      }
+      if (!allow && gate) this.#set({ verification: { command: pytestCommand(gate.target), status: 'denied' } });
+    }
     run.approval = undefined;
     this.#set({ approval: undefined, phase: 'streaming' });
-    if (allow && !run.quick) run.bridge?.grant();
+    if (allow && !run.quick && !agent) run.bridge?.grant();
     try {
       await run.forge.approve(run.sessionId, run.turnId, {
         type: 'user.tool_approval', threadId: approval.threadId, toolCallId: approval.id,
-        approval: allow ? { status: 'allow' } : { status: 'deny', reason: run.quick ? 'The user discarded the staged change.' : 'The user declined to share workspace metadata.' },
+        approval: allow ? { status: 'allow' } : { status: 'deny', reason: agent || run.quick ? 'The user declined this operation.' : 'The user declined to share workspace metadata.' },
       }, run.abort.signal);
-      if (!run.abort.signal.aborted) this.#activity(run.quick ? (allow ? 'Approved reviewed hunks' : 'Rejected Quick Edit')
+      if (!run.abort.signal.aborted) this.#activity(agent ? `${allow ? 'Approved' : 'Rejected'} ${approval.name}` : run.quick ? (allow ? 'Approved reviewed hunks' : 'Rejected Quick Edit')
         : (allow ? 'Approved workspace overview' : 'Rejected workspace overview'));
     } catch {
       run.bridge?.revoke();
@@ -517,11 +741,12 @@ export class StudioSession {
 
   async cancel() {
     const run = this.#active;
-    if (!run || run.abort.signal.aborted || run.quick?.committing || (run.terminal && !run.quick)) return;
+    if (!run || run.abort.signal.aborted || run.quick?.committing || run.agent?.committing || (run.terminal && !run.quick && !run.agent)) return;
     this.#set({ phase: 'cancelling', approval: undefined, review: undefined });
     run.approval = undefined;
     run.bridge?.revoke();
     run.quick?.patch?.revoke();
+    run.agent?.patch.close();
     run.abort.abort();
     run.releasePause?.();
     if (!run.terminal) await this.#cancelRemote(run);

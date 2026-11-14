@@ -1,0 +1,20 @@
+# Agent Mode
+
+Open a trusted single-folder workspace in VS Code. Start local TrueForge and configure the exact model registered there. Keep the outbound network policy enabled and allow `127.0.0.1` for VANTA's authenticated per-run MCP connector. Follow the [README setup](../README.md).
+
+Set **VANTA: Verification Python** in User Settings to an absolute path to a trusted Python interpreter with pytest and the project's dependencies available. On Windows a dedicated virtual environment's `Scripts/python.exe` is suitable. Use the project's declared dependencies when preparing the environment. During rehearsal set **Files: Auto Save** to **off**.
+
+1. Enable **Agent Mode** and **Share workspace context** in Agent Studio. Submit one request for changes to existing files.
+2. Use Context Explorer to see discovery results and the paths and reasons that entered the model context. Review the proposed files in Agent Studio. Selecting a hunk opens or navigates its native VS Code diff. Accept or reject each hunk, then choose **Approve selected hunks**. Related changes may depend on one another.
+3. Inspect the displayed pytest target. Choose **Allow once** to run that profile against a disposable snapshot with the accepted changes. Denying a gate, stopping before apply, a failed check or an incomplete TrueForge turn leaves the source buffers untouched.
+4. After verification and successful turn completion, VANTA checks the targets again and applies the accepted changes in one VS Code text edit batch. Use **File → Save All** to persist them. The Changes panel offers **Undo Agent changes** while the affected buffers still match the applied batch. Save again if you want to persist a buffer undo after saving the batch.
+
+## Definition and boundaries
+
+The versioned definition is the `agentModeDefinition` factory in [src/trueforge.ts](../src/trueforge.ts). Enable Agent Mode in a clean extension build to instantiate it automatically with the configured model and a fresh authenticated connector. The factory contains the exact instructions, deferred discovery configuration, local tool allowlist, and required approval names. The approval-gated tools are `review_changes` and `run_verification`. Workspace discovery and `stage_file_edit` have no authority to edit source files. Each run uses a dedicated TrueForge session.
+
+Agent Mode supports up to 12 existing, clean UTF-8 text files and 60 independently selectable hunks. A staging argument uses exact unique text anchors. Context has a whole-turn token budget and the bridge bounds reads and request size. Apply checks path scope, file content and editor version. If a batch is interrupted, VANTA attempts to restore buffers that still have the exact written content. Review any paths named in a recovery error in the editor. The in-memory undo is scoped to the current window and latest applied Agent Mode batch.
+
+The pytest profile accepts one discovered, existing relative Python file. The runner uses a shell-free subprocess, a minimal environment, bounded output, a 45-second execution limit and a Windows Job Object for descendant cleanup. The snapshot copies eligible small UTF-8 text files from disk and overlays the accepted hunks. Hidden and ignored files, linked paths, binaries and oversized files are outside the profile. The file and total size caps can make verification unavailable for some repositories. VANTA displays redacted stdout and stderr locally. TrueForge receives the result status and exit code.
+
+Run the profile only in a trusted repository. Its Python tests run with your account privileges and can access the OS and network. The snapshot contains routine project writes within a temporary directory. VS Code controls persistence and may save dirty buffers automatically when Auto Save is enabled.
