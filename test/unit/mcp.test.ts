@@ -11,6 +11,8 @@ import { bindOverview } from '../../src/workspace';
 import { ContextEngine, contextTools } from '../../src/context';
 import { Repository } from '../../src/repository';
 import { QuickPatch, proposeTool, reviewTool } from '../../src/quickPatch';
+import { AgentPatch, verifyAgentTool } from '../../src/agentPatch';
+import { VantaError } from '../../src/trueforge';
 
 test('workspace overview stays in the trusted root and filters names', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'vanta-root-'));
@@ -118,6 +120,43 @@ test('MCP proposal stages in memory and a review call cannot authorize itself', 
     assert.equal((await client.callTool(args)).isError, true);
     const repo = await Repository.bind(scope, { ripgrep: false });
     assert.equal(await repo.diskText('source.py', abort.signal), text);
+  } finally {
+    await client.close();
+    await bridge.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Agent MCP bounds batched ranges and rejects an unapproved command', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vanta-mcp-agent-'));
+  const scope = { path: root, isAvailable: () => true };
+  const signal = new AbortController().signal;
+  const repo = await Repository.bind(scope, { ripgrep: false });
+  const context = new ContextEngine(repo, 8000, () => undefined);
+  const patch = new AgentPatch();
+  const bridge = await startOverviewBridge(scope, signal, undefined, context, undefined, {
+    stage: async (proposal) => {
+      const text = await repo.diskText(proposal.path, signal);
+      return patch.stage({ path: proposal.path, text, start: 0, end: text.length, eol: '\n', version: 1 }, proposal);
+    }, review: (reference) => patch.consume(reference),
+    verify: async () => { throw new VantaError('No local approval'); },
+  });
+  const client = new Client({ name: 'local-test', version: '1.0.0' });
+  try {
+    await writeFile(join(root, 'sample.py'), Array.from({ length: 30 }, (_, index) => `sample_${index + 1}\n`).join(''));
+    await client.connect(new StreamableHTTPClientTransport(new URL(bridge.url), { requestInit: { headers: { Authorization: bridge.authorization } } }));
+    const range = { path: 'sample.py', start: 1, end: 30 };
+    const result = await client.callTool({ name: 'read_workspace_ranges', arguments: { ranges: [range, { ...range, path: '../sample.py' }] } });
+    assert.match(JSON.stringify(result.content), /sample_24/);
+    assert.doesNotMatch(JSON.stringify(result.content), /sample_25/);
+    assert.match(JSON.stringify(result.content), /workspace policy/);
+    assert.equal((await client.callTool({ name: 'read_workspace_ranges', arguments: { ranges: Array(6).fill(range) } })).isError, true);
+    const proposal = { path: 'sample.py', summary: 'Update sample', edits: [{ old: 'sample_24\n', replacement: 'reviewed\n' }] };
+    const batch = await client.callTool({ name: 'stage_related_edits', arguments: { files: [proposal, { ...proposal, path: '../sample.py' }] } });
+    assert.match(JSON.stringify(batch.content), /revision.+1/);
+    assert.match(JSON.stringify(batch.content), /workspace policy/);
+    assert.match(await repo.diskText('sample.py', signal), /sample_24/);
+    assert.equal((await client.callTool({ name: verifyAgentTool, arguments: { target: 'sample.py' } })).isError, true);
   } finally {
     await client.close();
     await bridge.close();

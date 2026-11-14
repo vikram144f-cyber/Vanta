@@ -152,6 +152,16 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
       }, ({ proposalId }) => edit(() => quick.receipt(proposalId)));
     }
     if (agent) {
+      server.registerTool('read_workspace_ranges', {
+        description: 'Read up to five known workspace ranges together. Each range returns up to 24 lines. Use it to collect exact anchors in related files.',
+        inputSchema: { ranges: z.array(z.strictObject({ path, start: line, end: line })).min(1).max(5) },
+        annotations: readOnly,
+      }, ({ ranges }) => expose((repo, deadline) => Promise.all(ranges.map((range) =>
+        repo.read(range.path, range.start, Math.max(range.start, Math.min(range.end, range.start + 23)), deadline)
+          .catch((error: unknown) => {
+            deadline.throwIfAborted();
+            return { path: range.path, error: error instanceof VantaError ? error.message : 'Could not read this range.' };
+          })))));
       const act = async (operation: () => unknown) => {
         if (closed || signal.aborted || !scope.isAvailable()) return failure('The Agent Mode scope ended.');
         try {
@@ -164,6 +174,14 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
         description: 'Stage all changes for one existing file. Provide its exact relative path and unique verbatim old text anchors plus their replacements. No workspace writes.',
         inputSchema: stageAgentSchema, annotations: readOnly,
       }, (proposal) => act(() => agent.stage(proposal)));
+      server.registerTool('stage_related_edits', {
+        description: 'Stage up to five related existing files together. Each file has unique old text anchors and replacements. Returns per-file results and the highest revision.',
+        inputSchema: { files: z.array(stageAgentSchema).min(1).max(5) }, annotations: readOnly,
+      }, ({ files }) => act(async () => {
+        const results = await Promise.allSettled(files.map((file) => agent.stage(file)));
+        return results.map((result, index) => result.status === 'fulfilled' ? result.value
+          : { path: files[index]?.path, error: result.reason instanceof VantaError ? result.reason.message : 'The file could not be staged.' });
+      }));
       server.registerTool(reviewAgentTool, {
         description: 'Open native multi-file review with the latest proposal ID and revision. Return the receipt for selected hunks. Approval required.',
         inputSchema: reviewAgentSchema, annotations: readOnly,

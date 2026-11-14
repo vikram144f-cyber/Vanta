@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import type { ApprovedFile } from './agentPatch';
 import { safeRelativePath } from './repository';
 import type { Repository } from './repository';
@@ -10,7 +10,7 @@ import { VantaError } from './trueforge';
 // The base Python process owns the Windows Job. The cancellation marker reaches
 // it even when the configured venv interpreter starts a Windows redirector.
 const bootstrap = String.raw`
-import os, runpy, sys, threading, time
+import os, sys, threading, time
 if os.name == 'nt':
     import ctypes as c
     from ctypes import wintypes as w
@@ -35,8 +35,11 @@ def cancel_when_requested(path):
         time.sleep(0.05)
     os._exit(124)
 threading.Thread(target=cancel_when_requested, args=(sys.argv[1],), daemon=True).start()
+import pytest
 sys.argv = ['pytest', *sys.argv[2:]]
-runpy.run_module('pytest', run_name='__main__', alter_sys=True)
+root = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [os.path.join(root, 'src'), root]
+sys.exit(pytest.console_main())
 `;
 
 export interface VerificationResult {
@@ -89,32 +92,40 @@ export async function runPytest(repo: Repository, python: string, target: string
 function execute(python: string, script: string, cwd: string, target: string, signal: AbortSignal, timeout: number): Promise<VerificationResult> {
   signal.throwIfAborted();
   const windows = process.platform === 'win32';
-  const env: NodeJS.ProcessEnv = { TEMP: cwd, TMP: cwd, TMPDIR: cwd, PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1',
-    PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE: '1', PYTHONNOUSERSITE: '1' };
+  const env: NodeJS.ProcessEnv = { TEMP: cwd, TMP: cwd, TMPDIR: cwd, PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1' };
   if (windows) env.SystemRoot = process.env.SystemRoot;
-  const roots = [resolve(cwd, 'src'), cwd];
-  env.PYTHONPATH = roots.join(windows ? ';' : ':');
   return new Promise((resolve, reject) => {
     const marker = join(cwd, '.vanta-cancel');
-    const child = spawn(python, ['-u', script, marker, target, '-q'], { cwd, env, shell: false, windowsHide: true,
+    const child = spawn(python, ['-I', '-B', '-u', '-X', 'utf8', script, marker, target, '-q'], { cwd, env, shell: false, windowsHide: true,
       detached: !windows, stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks: Buffer[] = [];
     let size = 0;
     let stopped: 'timed out' | 'cancelled' | undefined;
+    let hardStop: ReturnType<typeof setTimeout> | undefined;
     const stop = (reason: typeof stopped) => {
       if (stopped) return;
       stopped = reason;
-      if (windows) void writeFile(marker, '', { flag: 'wx' }).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== 'EEXIST') child.kill();
-      });
-      else killGroup();
+      if (windows) {
+        const killTree = () => {
+          if (!child.pid || child.exitCode !== null) return;
+          if (!env.SystemRoot) { child.kill(); return; }
+          const terminator = spawn(join(env.SystemRoot, 'System32', 'taskkill.exe'), ['/T', '/F', '/PID', String(child.pid)],
+            { shell: false, windowsHide: true, stdio: 'ignore', env });
+          terminator.once('error', () => { child.kill(); });
+          terminator.once('exit', () => { if (child.exitCode === null) child.kill(); });
+        };
+        hardStop = setTimeout(killTree, 2500);
+        void writeFile(marker, '', { flag: 'wx' }).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== 'EEXIST') { clearTimeout(hardStop); killTree(); }
+        });
+      } else killGroup();
     };
     const killGroup = () => {
       if (child.pid) try { process.kill(-child.pid, 'SIGKILL'); } catch { /* process group already exited */ }
     };
     const cancel = () => stop('cancelled');
     const timer = setTimeout(() => stop('timed out'), timeout);
-    const dispose = () => { clearTimeout(timer); signal.removeEventListener('abort', cancel); };
+    const dispose = () => { clearTimeout(timer); clearTimeout(hardStop); signal.removeEventListener('abort', cancel); };
     const collect = (chunk: Buffer) => {
       const max = 8192 - size;
       if (max > 0) chunks.push(chunk.subarray(0, max));

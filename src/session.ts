@@ -87,6 +87,7 @@ interface Run {
   bridge?: OverviewBridge;
   calls: Map<string, { name: string; sourceId: string; allowed: boolean; proposalId?: string; reference?: ReviewReference; target?: string }>;
   approval?: { threadId: string; id: string; canAllow: boolean; name?: string };
+  decided?: Set<string>;
   pauseCursor?: string;
   decision?: Promise<void>;
   releasePause?: () => void;
@@ -229,7 +230,7 @@ export class StudioSession {
         if (repository) context = new ContextEngine(repository, budget, (report: ContextReport) => {
           for (const hit of report.hits) if (hit.selected) editing?.discovered.add(hit.path);
           if (!signal.aborted) this.#set({ context: [...(this.state.context ?? []).slice(-11), report] });
-        }, editing ? 0.24 : undefined);
+        }, !!editing);
       }
       if (mentions.length && !context) throw new VantaError('Enable workspace context and open one trusted local folder to resolve references.');
       const attached = mentions.length && context ? await context.mentions(mentions, AbortSignal.any([signal, AbortSignal.timeout(8000)])) : [];
@@ -442,7 +443,7 @@ export class StudioSession {
       case 'tool.approval_required': {
         if (run.agent && event.threadId !== 'main') throw new VantaError('Unexpected Agent Mode approval thread.');
         const call = event.toolCalls[0];
-        if (call && run.approval?.id === call.id) break;
+        if (call && (run.approval?.id === call.id || run.decided?.has(call.id))) break;
         if (!call || event.toolCalls.length !== 1 || run.approval) {
           throw new VantaError('TrueForge requested multiple or overlapping approvals. This version of VANTA supports one workspace call at a time.');
         }
@@ -546,7 +547,7 @@ export class StudioSession {
       const info = call.toolInfo;
       if (!call.id || !info) continue;
       const direct = info.type === 'mcp' && !!run.bridge && info.serverName === run.bridge.name;
-      const name = direct && [overviewToolName, proposeTool, reviewTool, stageAgentTool, reviewAgentTool, verifyAgentTool, 'read_file', 'search_workspace'].includes(info.name) ? info.name : info.type === 'truefoundry-system'
+      const name = direct && [overviewToolName, proposeTool, reviewTool, stageAgentTool, reviewAgentTool, verifyAgentTool, 'stage_related_edits', 'read_file', 'read_workspace_ranges', 'search_workspace'].includes(info.name) ? info.name : info.type === 'truefoundry-system'
         && ['list_tools', 'get_tool_info', 'call_tool', 'get_tool_output_schema'].includes(info.name) ? info.name : 'TrueForge tool';
       let proposalId: string | undefined;
       let reference: ReviewReference | undefined;
@@ -698,6 +699,7 @@ export class StudioSession {
     const approval = run?.approval;
     if (!run?.sessionId || !run.turnId || !approval || id !== approval.id || (allow && !approval.canAllow) || run.abort.signal.aborted) return;
     const releasePause = run.releasePause;
+    (run.decided ??= new Set()).add(approval.id);
     const agent = run.agent;
     if (agent) {
       if (!allow) agent.denied = true;
