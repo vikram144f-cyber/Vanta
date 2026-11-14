@@ -76,7 +76,7 @@ test('batch failure compensates an earlier write and preserves a divergent buffe
 
 const python = process.env.VANTA_TEST_PYTHON;
 
-for (const verdict of ['allow', 'deny', 'cancel', 'forged'] as const) {
+for (const verdict of ['allow', 'deferred', 'deny', 'cancel', 'forged'] as const) {
   test(`Agent Mode patch and verification gates · ${verdict}`, { skip: !python, timeout: 15_000 }, async () => {
     assert.ok(python);
     const path = 'test_fixture.py';
@@ -91,8 +91,10 @@ for (const verdict of ['allow', 'deny', 'cancel', 'forged'] as const) {
     const approved: string[] = [];
     const createdAt = '2026-11-14T00:00:00Z';
     const pause = function* (name: string, args: unknown): Generator<Event> {
+      const deferred = verdict === 'deferred';
       yield { type: 'model.message', id: name, createdAt, threadId: 'main', toolCalls: [{ id: name, type: 'function',
-        function: { name, arguments: JSON.stringify(args) }, toolInfo: { type: 'mcp', name, serverName: 'test-mcp', serverId: 'test' } }] };
+        function: { name: deferred ? 'call_tool' : name, arguments: JSON.stringify(deferred ? { mcp_server: 'test-mcp', tool_name: name, input: args } : args) },
+        toolInfo: deferred ? { type: 'truefoundry-system', name: 'call_tool' } : { type: 'mcp', name, serverName: 'test-mcp', serverId: 'test' } }] };
       yield { type: 'tool.approval_required', id: name + '-pause', createdAt, threadId: 'main', toolCalls: [{ id: name, sourceEventId: name }] };
     };
     const response = (toolCallId: string, payload: unknown): Event => ({ type: 'tool.response', id: toolCallId + '-result',
@@ -163,9 +165,9 @@ for (const verdict of ['allow', 'deny', 'cancel', 'forged'] as const) {
       if (verdict === 'cancel') await session.cancel();
       else await session.decide(command.id, verdict !== 'deny');
       await run;
-      assert.equal(writes, verdict === 'allow' ? 1 : 0);
+      assert.equal(writes, verdict === 'allow' || verdict === 'deferred' ? 1 : 0);
       assert.deepEqual(approved, verdict === 'cancel' ? ['allow'] : ['allow', verdict === 'deny' ? 'deny' : 'allow']);
-      if (verdict === 'allow') assert.equal(session.state.verification?.status, 'passed');
+      if (verdict === 'allow' || verdict === 'deferred') assert.equal(session.state.verification?.status, 'passed');
       if (verdict === 'deny') assert.equal(session.state.verification?.status, 'denied');
       if (verdict === 'cancel') assert.equal(session.state.phase, 'cancelled');
       if (verdict === 'forged') assert.equal(session.state.phase, 'failed');

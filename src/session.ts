@@ -547,30 +547,36 @@ export class StudioSession {
       const info = call.toolInfo;
       if (!call.id || !info) continue;
       const direct = info.type === 'mcp' && !!run.bridge && info.serverName === run.bridge.name;
-      const name = direct && [overviewToolName, proposeTool, reviewTool, stageAgentTool, reviewAgentTool, verifyAgentTool, 'stage_related_edits', 'read_file', 'read_workspace_ranges', 'search_workspace'].includes(info.name) ? info.name : info.type === 'truefoundry-system'
+      let name = direct && [overviewToolName, proposeTool, reviewTool, stageAgentTool, reviewAgentTool, verifyAgentTool, 'stage_related_edits', 'read_file', 'read_workspace_ranges', 'search_workspace'].includes(info.name) ? info.name : info.type === 'truefoundry-system'
         && ['list_tools', 'get_tool_info', 'call_tool', 'get_tool_output_schema'].includes(info.name) ? info.name : 'TrueForge tool';
+      let args: unknown;
+      let bound = direct;
+      try {
+        if (call.function?.arguments) args = JSON.parse(call.function.arguments);
+      } catch { /* wait for subsequent argument fragments */ }
+      if (info.type === 'truefoundry-system' && name === 'call_tool' && run.bridge && args && typeof args === 'object'
+        && 'mcp_server' in args && args.mcp_server === run.bridge.name && 'tool_name' in args && 'input' in args
+        && ((run.quick && args.tool_name === reviewTool)
+          || (run.agent && (args.tool_name === reviewAgentTool || args.tool_name === verifyAgentTool)))) {
+        name = args.tool_name;
+        args = args.input;
+        bound = true;
+      }
       let proposalId: string | undefined;
       let reference: ReviewReference | undefined;
       let target: string | undefined;
-      if (run.quick && direct && name === reviewTool && call.function?.arguments) {
-        try {
-          const args = reviewSchema.safeParse(JSON.parse(call.function.arguments));
-          if (args.success) proposalId = args.data.proposalId;
-        } catch { /* partial or invalid tool arguments */ }
+      if (run.quick && bound && name === reviewTool) {
+        const parsed = reviewSchema.safeParse(args);
+        if (parsed.success) proposalId = parsed.data.proposalId;
       }
-      if (run.agent && direct && call.function?.arguments) {
-        try {
-          const args: unknown = JSON.parse(call.function.arguments);
-          if (name === reviewAgentTool) reference = reviewAgentSchema.parse(args);
-          if (name === verifyAgentTool) {
-            const candidate = verifyAgentSchema.parse(args).target;
-            if (verificationTarget(candidate) && run.agent.discovered.has(candidate)) target = candidate;
-          }
-        } catch { /* partial or invalid tool arguments */ }
+      if (run.agent && bound && name === reviewAgentTool) reference = reviewAgentSchema.safeParse(args).data;
+      if (run.agent && bound && name === verifyAgentTool) {
+        const candidate = verifyAgentSchema.safeParse(args).data?.target;
+        if (candidate && verificationTarget(candidate) && run.agent.discovered.has(candidate)) target = candidate;
       }
       const previous = run.calls.get(call.id);
       if (!previous || proposalId || reference || target) run.calls.set(call.id, { name, sourceId, proposalId, reference, target,
-        allowed: direct && (run.quick ? !!proposalId : run.agent ? !!(reference || target) : name === overviewToolName) });
+        allowed: bound && (run.quick ? !!proposalId : run.agent ? !!(reference || target) : name === overviewToolName) });
       if (!previous) this.#activity('Tool requested', name);
     }
   }

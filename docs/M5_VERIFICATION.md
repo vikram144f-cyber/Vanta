@@ -14,6 +14,8 @@ VANTA uses TrueForge 0.185.1 and the 0.185.0 TypeScript SDK. Agent Mode is insta
 
 The Flask fixture started at `22d924701a6ae2e4cd01e9a15bbaf3946094af65`. In VS Code Agent Studio, the official Task B prompt ran verbatim without filename hints, attachments or a selected editor range.
 
+> Add a new built-in CLI command flask config that prints the loaded application's configuration as JSON, masking the values of any key containing SECRET, PASSWORD, TOKEN or KEY as "***". It must appear in flask --help, be covered by a test, and be documented alongside the other built-in commands.
+
 | Session | Observed result |
 | --- | --- |
 | `01m7d05eqsy85vqfw37641dzqe` | Native Studio with Gemini 3.5 Flash. Deferred trace `list_tools`, `get_tool_info`, `call_tool` then `search_workspace`. Returned `src/flask/cli.py:971–993` (filename, declaration and import matches), `tests/test_cli.py:322–344` (related tests and task terms), and `docs/cli.rst:419–441` (related docs). Provider rate limit ended the turn before staging. The Flask working tree was clean before and after. |
@@ -24,8 +26,14 @@ The Flask fixture started at `22d924701a6ae2e4cd01e9a15bbaf3946094af65`. In VS C
 | `01m7d0rp11xad8k5g0dwb99g3d`, `01m7d0x6v9y0ghy9qrtytbpyfw` | Further native Task B attempts with Gemini Flash Lite Latest and Gemini 3.5 Flash Lite. The provider returned HTTP 429 before the review gate. |
 | `01m7d10gpqwygypngddqjda9hg` | Native Task B with batched reads and Gemini Flash Lite Latest. The provider reported a free-tier request limit of 15 and returned HTTP 429 before staging. |
 | `01m7d14gebwnb6hznagfa1h1wn`, `01m7d15h9xf4bmky98r194fgsw` | Native Task B with batched reads and staging available. Gemini 3.5 Flash hit 429 on the initial model call. Gemini Flash Lite Latest found all three paths and hit 429 after discovery and focused reads. Git status remained clean. |
+| `01m7d17h3fqpjk5yb46rwzfvsh` | Attempt through the live adapter with Gemini 3.1 Pro Preview. The provider returned 429 and reported a free-tier limit of zero. |
+| `01m7d1ac4bxjwskszm1a60sns1` | Native Task B with Gemini Flash Lite Latest. Deferred discovery, literal search and batched reads returned source from all three paths. The model exhausted its request limit before issuing staging. |
+| `01m7d1df6h1dygn87d9xjbc3an` | Task B through the live adapter using Gemini 3.1 Flash Lite. Returned source from the pinned checkout. The provider returned 429 before staging. |
+| `01m7d1ecrm7886jwa82he1wb4y` | Native Task A regression with Gemini Flash Lite Latest revealed that TrueForge can request Quick Edit approval through its deferred `call_tool` helper. This version initially rejected it and cancelled without applying. The host now checks the exact connector, tool and arguments for deferred Quick Edit and Agent Mode review calls. |
 | `01m7d0gx5wcpnqmhjtm6vjhg7s` | M3 live regression passed with Gemini Flash Lite Latest. Deferred discovery found all three paths, and same-session symbol lookup and explicit references completed. |
 | `01m7d0kgdqj4ns2yacsdm6bk8t` | Live streaming and MCP overview regression passed with Gemini Flash Lite Latest. Separate sessions verified native allow, deny and cancellation. |
 | `01m7d0krr94tw5xynp6g2hef4p` | Non-Flask invoice fixture passed through live TrueForge with Gemini 3.5 Flash Lite and an in-memory editor adapter. Deferred discovery returned `totals.py` (filename and task match), `tests/test_totals.py` (related test), and `docs/invoices.md` (filename and task match). All three staged files reached revision 3. TrueForge emitted `tool.approval_required`, `user.tool_approval` and `tool.response` for each of `review_changes` and `run_verification`, followed by `turn.done`. The command `python -m pytest tests/test_totals.py -q` had exit 0 and two passing tests. The adapter's apply and undo assertions passed and the Git worktree stayed clean. |
 
-The saved Task B change, CLI help, masked synthetic JSON and final on-disk test run require a live run that reaches both approvals and completion. M6 resilience will need the same clean-worktree rehearsal as well as a verified secondary-model attempt.
+The final verification runner also executed the unchanged Flask checkout from its disposable snapshot. It returned exit 0 with 55 passed and three optional skips. The saved Task B change, CLI help, masked synthetic JSON and final on-disk test run require a live run that reaches both approvals and completion. M6 resilience will need the same clean-worktree rehearsal as well as a verified secondary-model attempt.
+
+The live adapter is reproducible by setting `VANTA_AGENT_MODEL` and `VANTA_TEST_PYTHON`, then running `npx tsx --test test/live/agentMode.test.ts`. Set `VANTA_AGENT_FLASK` to a clean pinned checkout to run the exact Task B through the adapter. Native review, buffer apply and save should be reproduced from Agent Studio using the [Agent Mode guide](AGENT_MODE.md).

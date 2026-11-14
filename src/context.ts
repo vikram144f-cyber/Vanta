@@ -239,7 +239,7 @@ export class ContextEngine {
       const anchor = anchors.find((item) => words.includes(item.name.toLowerCase()));
       const score = pathWords.length * 10 + bestCount * 3 + (anchor ? 12 : 0);
       if (!score) continue;
-      const start = anchor?.start ?? Math.max(1, bestLine - 4);
+      const start = this.agentMode ? Math.max(1, bestLine - 4) : anchor?.start ?? Math.max(1, bestLine - 4);
       const signals = [pathWords.length ? `filename matches ${pathWords.join(', ')}` : '',
         anchor ? `${anchor.source}: ${anchor.name}` : '', bestCount ? `task terms on line ${bestLine + 1}` : ''].filter(Boolean);
       candidates.push({ path, start, end: Math.min(file.lines.length, start + 22), file, score, reason: signals.join(' · '), symbol: anchor?.name, selected: false });
