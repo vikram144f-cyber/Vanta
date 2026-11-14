@@ -24,6 +24,7 @@ export interface Forge {
 }
 
 export class VantaError extends Error {}
+export class LoopbackConnectorBlocked extends VantaError {}
 
 export function safeError(error: unknown): string {
   if (error instanceof VantaError) return error.message;
@@ -57,6 +58,9 @@ export function inlineAgent(model: string, connector?: string): SessionAgent {
       instructions: 'You are VANTA, a VS Code coding assistant. If asked about the current workspace, use get_workspace_overview when available. If it is denied or unavailable, say so. Never guess the contents of the workspace.',
       config: {
         sandbox: { enabled: false },
+        askUserQuestions: { enabled: false },
+        dynamicSubAgents: { enabled: false },
+        generativeUi: { enabled: false },
         contextManagement: { largeToolResponse: { enabled: false } },
         iterationLimit: 12,
       },
@@ -123,13 +127,23 @@ export class TrueForgeClient implements Forge {
   }
 
   async register(connector: Connector, signal: AbortSignal) {
-    await this.#client.settings.mcpServers.create({ manifest: {
-      name: connector.name,
-      type: 'remote',
-      url: connector.url,
-      description: 'VANTA read-only workspace overview for the active request.',
-      auth: { type: 'header', headers: { Authorization: connector.authorization } },
-    } }, { abortSignal: signal });
+    try {
+      await this.#client.settings.mcpServers.create({ manifest: {
+        name: connector.name,
+        type: 'remote',
+        url: connector.url,
+        description: 'VANTA read-only workspace overview for the active request.',
+        auth: { type: 'header', headers: { Authorization: connector.authorization } },
+      } }, { abortSignal: signal });
+    } catch (error) {
+      if (error instanceof TrueForgeError && error.statusCode === 400) {
+        const body = error.body as { error?: { message?: unknown } } | undefined;
+        if (body?.error?.message === 'Outbound URL blocked for host "127.0.0.1"') {
+          throw new LoopbackConnectorBlocked('TrueForge blocked its loopback connector. See the VANTA README to enable workspace overview.');
+        }
+      }
+      throw error;
+    }
   }
 
   async remove(name: string) {

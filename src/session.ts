@@ -2,7 +2,7 @@ import type { TrueForgeApi as Api } from '@truefoundry/trueforge-sdk';
 import type { OverviewBridge } from './mcp';
 import { isBusy } from './protocol';
 import type { StudioState } from './protocol';
-import { inlineAgent, overviewToolName, safeError, VantaError } from './trueforge';
+import { inlineAgent, LoopbackConnectorBlocked, overviewToolName, safeError, VantaError } from './trueforge';
 import type { Event, Forge } from './trueforge';
 
 export interface Settings {
@@ -32,7 +32,7 @@ interface Run {
   releasePause?: () => void;
   cancellation?: Promise<void>;
   finished?: Promise<void>;
-  terminal: boolean;
+  terminal?: 'completed' | 'cancelled' | 'failed';
 }
 
 export class StudioSession {
@@ -113,7 +113,7 @@ export class StudioSession {
       this.#set({ phase: 'failed', error: safeError(error) });
       return Promise.resolve();
     }
-    const run: Run = { id: ++this.#nextRun, forge, abort: new AbortController(), calls: new Map(), terminal: false };
+    const run: Run = { id: ++this.#nextRun, forge, abort: new AbortController(), calls: new Map() };
     this.#active = run;
     this.#set({
       phase: 'starting', activity: [], sessionId: undefined, error: undefined,
@@ -127,15 +127,26 @@ export class StudioSession {
     const signal = run.abort.signal;
     try {
       if (settings.workspaceOverview) {
-        run.bridge = await this.dependencies.bridge(signal);
+        try {
+          run.bridge = await this.dependencies.bridge(signal);
+        } catch (error) {
+          signal.throwIfAborted();
+          this.#activity('Workspace tool unavailable', error instanceof VantaError ? error.message : 'Could not open the local workspace tool.');
+        }
         if (run.bridge) {
           try {
             await run.forge.register(run.bridge, signal);
           } catch (error) {
             if (signal.aborted) throw error;
-            throw new VantaError('TrueForge could not register the workspace tool. Check Connectors or disable Workspace Overview for chat.');
+            if (error instanceof LoopbackConnectorBlocked) {
+              await run.bridge.close();
+              run.bridge = undefined;
+              this.#activity('Workspace tool unavailable', error.message);
+            } else {
+              throw new VantaError('TrueForge could not register the workspace tool. Check Connectors or disable Workspace Overview for chat.');
+            }
           }
-        } else {
+        } else if (!this.state.activity.some((item) => item.label === 'Workspace tool unavailable')) {
           this.#activity('Workspace tool unavailable', 'Open one trusted local folder to enable the overview.');
         }
       }
@@ -163,8 +174,7 @@ export class StudioSession {
       if (!run.terminal && !signal.aborted) throw new VantaError('The TrueForge stream ended before the turn completed. Check the session in TrueForge.');
     } catch (error) {
       if (!signal.aborted && !run.terminal) {
-        this.#set({ phase: 'failed', error: safeError(error), approval: undefined });
-        this.#activity('Failed');
+          this.#set({ error: safeError(error), approval: undefined });
       }
     } finally {
       run.releasePause?.();
@@ -178,12 +188,10 @@ export class StudioSession {
         }
       }
       this.#active = undefined;
-      if (signal.aborted && this.state.phase === 'cancelling') {
-        this.#set({ phase: 'cancelled' });
-        this.#activity('Cancelled');
-      } else {
-        this.#set({});
-      }
+      const phase = run.terminal ?? (signal.aborted ? 'cancelled' : 'failed');
+      this.#set({ phase, approval: undefined });
+      const label = { completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' }[phase];
+      this.#activity(label);
     }
   }
 
@@ -245,19 +253,10 @@ export class StudioSession {
       case 'mcp.auth_required':
         throw new VantaError('This agent requested an interactive action that VANTA does not support. Open the session in TrueForge.');
       case 'turn.done':
-        run.terminal = true;
+        run.terminal = event.state.status === 'done' ? 'completed' : event.state.status === 'cancelled' ? 'cancelled' : 'failed';
         run.approval = undefined;
-        this.#set({ approval: undefined });
-        if (event.state.status === 'done') {
-          this.#set({ phase: 'completed' });
-          this.#activity('Completed');
-        } else if (event.state.status === 'cancelled') {
-          this.#set({ phase: 'cancelled' });
-          this.#activity('Cancelled');
-        } else {
-          this.#set({ phase: 'failed', error: 'The TrueForge agent reported a failure. Check the session and model configuration in TrueForge.' });
-          this.#activity('Failed');
-        }
+        this.#set({ approval: undefined, error: run.terminal === 'failed'
+          ? 'The TrueForge agent reported a failure. Check the session and model configuration in TrueForge.' : undefined });
         break;
     }
   }
@@ -288,6 +287,7 @@ export class StudioSession {
     const run = this.#active;
     const approval = run?.approval;
     if (!run?.sessionId || !run.turnId || !approval || id !== approval.id || (allow && !approval.canAllow) || run.abort.signal.aborted) return;
+    const releasePause = run.releasePause;
     run.approval = undefined;
     this.#set({ approval: undefined, phase: 'streaming' });
     if (allow) run.bridge?.grant();
@@ -304,7 +304,7 @@ export class StudioSession {
         await this.cancel();
       }
     } finally {
-      run.releasePause?.();
+      releasePause?.();
     }
   }
 

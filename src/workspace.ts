@@ -7,12 +7,17 @@ export interface WorkspaceScope {
   isAvailable(): boolean;
 }
 
+function normalizeDrive(path: string): string {
+  return process.platform === 'win32' ? path.replace(/^[a-z]:/i, (drive) => drive.toUpperCase()) : path;
+}
+
 async function verifyRoot(scope: WorkspaceScope): Promise<string> {
-  if (!scope.isAvailable() || !isAbsolute(scope.path) || scope.path.startsWith('\\\\')) {
+  if (!scope.isAvailable() || !isAbsolute(scope.path)
+    || (process.platform === 'win32' && !/^[a-z]:\\[^:]*$/i.test(scope.path))) {
     throw new VantaError('Workspace overview requires a trusted local folder.');
   }
-  const root = resolve(scope.path);
-  if (await realpath(root) !== root || !(await stat(root)).isDirectory()) {
+  const root = normalizeDrive(resolve(scope.path));
+  if (!basename(root) || normalizeDrive(await realpath(root)) !== root || !(await stat(root)).isDirectory()) {
     throw new VantaError('Workspace overview requires a canonical local folder.');
   }
   return root;
