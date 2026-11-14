@@ -17,7 +17,7 @@ test('live TrueForge streaming and optionally MCP allow/deny and cancellation', 
   const session = new StudioSession({
     settings: () => ({ serverUrl, model, agentName: '', workspaceOverview: true }),
     forge: (url) => new TrueForgeClient(url),
-    bridge: (signal) => startOverviewBridge({ path: root, isAvailable: () => true }, signal),
+    bridge: (signal, name, context) => startOverviewBridge({ path: root, isAvailable: () => true }, signal, name, context),
   });
   let choice: 'allow' | 'deny' | 'cancel' = 'allow';
   let streamUpdates = 0;

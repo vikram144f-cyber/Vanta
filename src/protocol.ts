@@ -1,3 +1,5 @@
+import type { ContextReport } from './context';
+
 export interface Connection {
   status: 'checking' | 'connected' | 'offline';
   detail: string;
@@ -35,18 +37,17 @@ export interface StudioState {
   sessionId?: string;
   approval?: Approval;
   error?: string;
+  context?: ContextReport[];
 }
 
 export type StudioAction =
-  | { type: 'ready' | 'refreshConnection' | 'cancelRun' | 'clearConversation' }
-  | { type: 'submitPrompt'; text: string }
+  | { type: 'ready' | 'refreshConnection' | 'cancelRun' | 'clearConversation' | 'pickReference' }
+  | { type: 'submitPrompt'; text: string; shareContext?: boolean }
   | { type: 'selectModel'; model: string }
+  | { type: 'openContext'; path: string; line: number }
   | { type: 'decideApproval'; id: string; allow: boolean };
 
-export interface StudioUpdate {
-  type: 'snapshot';
-  state: StudioState;
-}
+export type StudioUpdate = { type: 'snapshot'; state: StudioState } | { type: 'insertReference'; text: string };
 
 export function parseStudioAction(value: unknown): StudioAction | undefined {
   if (!value || typeof value !== 'object' || !('type' in value)) return;
@@ -55,10 +56,17 @@ export function parseStudioAction(value: unknown): StudioAction | undefined {
     case 'refreshConnection':
     case 'cancelRun':
     case 'clearConversation':
+    case 'pickReference':
       return { type: value.type };
     case 'submitPrompt':
       if ('text' in value && typeof value.text === 'string' && value.text.length <= 12_000 && value.text.trim()) {
-        return { type: value.type, text: value.text.trim() };
+        return { type: value.type, text: value.text.trim(), ...('shareContext' in value && value.shareContext === true ? { shareContext: true } : {}) };
+      }
+      return;
+    case 'openContext':
+      if ('path' in value && typeof value.path === 'string' && value.path.length <= 480
+        && 'line' in value && typeof value.line === 'number' && Number.isInteger(value.line) && value.line > 0) {
+        return { type: value.type, path: value.path, line: value.line };
       }
       return;
     case 'selectModel':

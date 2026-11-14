@@ -42,6 +42,10 @@ Set `VANTA_LIVE_URL` for another local TrueForge port. Unset `VANTA_LIVE_MCP` fo
 
 ## Implementation
 
-The React webview receives typed snapshots from the TypeScript extension host, which validates UI actions and consumes TrueForge events through the official SDK. Each request creates a fresh TrueForge session and, when allowed, a disposable bearer-authenticated MCP connector bound to `127.0.0.1`. The tool returns filtered top-level names and counts, with no file contents. Approval resolves a real `tool.approval_required` event and sends a `user.tool_approval` decision. A separate one-use host grant binds workspace access to the active request. The bridge closes and the connector is deleted when the run ends. TrueForge stays responsible for model calls, tool invocation and the recorded session.
+The React webview receives typed snapshots from the TypeScript extension host, which validates UI actions and consumes TrueForge events through the official SDK. Each request uses a disposable bearer-authenticated MCP endpoint on `127.0.0.1` when workspace tools are available. The overview returns filtered top-level names and counts. It resolves a real `tool.approval_required` event, sends a `user.tool_approval` decision, and requires a separate one-use host grant. Repository tools use the composer's explicit sharing consent. The bridge closes and the connector is deleted when the run ends. TrueForge owns model calls, tool invocation and recorded conversation history.
 
 See [verification results](docs/VERTICAL_SLICE.md) and the [competition architecture](docs/ARCHITECTURE.md).
+
+## Repository discovery
+
+Enable **Share workspace context** for a turn to allow read-only search, symbol lookup, and bounded snippets. Use **Add file…** or type `@file:path` and `@symbol:name` for explicit references. **Context Explorer** shows returned paths, selection reasons and estimated budget usage. Follow-up turns reuse the current TrueForge session. **New conversation** resets it. See the [context engine guide](docs/CONTEXT_ENGINE.md).

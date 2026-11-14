@@ -6,35 +6,107 @@
   "version": "0.1.0",
   "license": "MIT",
   "private": true,
-  "engines": { "vscode": "^1.100.0", "node": ">=22" },
-  "categories": ["AI", "Other"],
-  "extensionKind": ["workspace"],
+  "engines": {
+    "vscode": "^1.100.0",
+    "node": ">=22"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
   "main": "./dist/extension.cjs",
   "capabilities": {
-    "untrustedWorkspaces": { "supported": "limited", "description": "Chat is available. Workspace tools require trust." },
-    "virtualWorkspaces": { "supported": "limited", "description": "Workspace tools require a local folder." }
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Chat is available. Workspace tools require trust."
+    },
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "Workspace tools require a local folder."
+    }
   },
-  "activationEvents": ["onView:vanta.studio"],
+  "activationEvents": [
+    "onView:vanta.studio"
+  ],
   "contributes": {
     "viewsContainers": {
-      "activitybar": [{ "id": "vanta", "title": "VANTA", "icon": "media/vanta.svg" }]
+      "activitybar": [
+        {
+          "id": "vanta",
+          "title": "VANTA",
+          "icon": "media/vanta.svg"
+        }
+      ]
     },
     "views": {
-      "vanta": [{ "type": "webview", "id": "vanta.studio", "name": "Agent Studio" }]
+      "vanta": [
+        {
+          "type": "webview",
+          "id": "vanta.studio",
+          "name": "Agent Studio"
+        }
+      ]
     },
     "commands": [
-      { "command": "vanta.openStudio", "title": "VANTA: Open Agent Studio" },
-      { "command": "vanta.quickEdit", "title": "VANTA: Quick Edit" },
-      { "command": "vanta.cancelRun", "title": "VANTA: Cancel Current Run" }
+      {
+        "command": "vanta.openStudio",
+        "title": "VANTA: Open Agent Studio"
+      },
+      {
+        "command": "vanta.quickEdit",
+        "title": "VANTA: Quick Edit"
+      },
+      {
+        "command": "vanta.cancelRun",
+        "title": "VANTA: Cancel Current Run"
+      }
     ],
-    "keybindings": [{ "command": "vanta.quickEdit", "key": "ctrl+alt+i", "mac": "cmd+alt+i", "when": "editorTextFocus && editorHasSelection" }],
+    "keybindings": [
+      {
+        "command": "vanta.quickEdit",
+        "key": "ctrl+alt+i",
+        "mac": "cmd+alt+i",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
     "configuration": {
       "title": "VANTA",
       "properties": {
-        "vanta.serverUrl": { "type": "string", "default": "http://localhost:8790", "scope": "application", "description": "Base URL of local TrueForge (loopback only)." },
-        "vanta.model": { "type": "string", "default": "", "scope": "application", "description": "Exact model name registered in TrueForge. Leave blank to choose in Agent Studio." },
-        "vanta.agentName": { "type": "string", "default": "", "scope": "application", "description": "Optional saved TrueForge agent used when the workspace tool is disabled. Use a VANTA agent you have configured for chat only." },
-        "vanta.workspaceOverview": { "type": "boolean", "default": true, "scope": "application", "description": "Offer the approval-gated workspace overview in a trusted local folder." }
+        "vanta.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:8790",
+          "scope": "application",
+          "description": "Base URL of local TrueForge (loopback only)."
+        },
+        "vanta.model": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Exact model name registered in TrueForge. Leave blank to choose in Agent Studio."
+        },
+        "vanta.agentName": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Optional saved TrueForge agent used when the workspace tool is disabled. Use a VANTA agent you have configured for chat only."
+        },
+        "vanta.workspaceOverview": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Offer read-only workspace tools in a trusted local folder."
+        },
+        "vanta.contextBudget": {
+          "type": "integer",
+          "default": 8000,
+          "minimum": 2000,
+          "maximum": 16000,
+          "scope": "application",
+          "description": "Estimated repository context tokens allowed per turn."
+        }
       }
     }
   },
@@ -45,14 +117,16 @@
     "lint": "eslint .",
     "test": "tsx --test test/unit/*.test.ts",
     "test:extension": "npm run build && node scripts/test-extension.mjs",
-    "test:live": "tsx --test test/live/trueforge.test.ts",
+    "test:live": "tsx --test --test-concurrency=1 test/live/*.test.ts",
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.0",
     "@truefoundry/trueforge-sdk": "0.185.0",
+    "ignore": "7.0.14",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.17.0",

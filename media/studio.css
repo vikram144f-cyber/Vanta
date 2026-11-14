@@ -67,6 +67,18 @@ select, textarea { width: 100%; }
 .composer textarea { resize: vertical; min-height: 46px; max-height: 25dvh; padding: 7px 9px; }
 .composer textarea::placeholder { color: var(--vscode-input-placeholderForeground); }
 .composer-footer { margin-top: 3px; }
+.composer-context { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; }
+.composer-context label { font-size: .87rem; }
+.composer-context input { vertical-align: middle; accent-color: var(--accent); }
+.context-note { font-size: .82rem; }
+.context-explorer[open] { width: 100%; }
+.context-results { max-height: min(180px, 24dvh); overflow: auto; margin-top: 4px; }
+.context-results section { margin: 5px 0; }
+.context-results h2 { font-size: .88rem; }
+.context-results ul { list-style: none; padding: 0; margin: 2px 0; }
+.context-results li { padding: 3px 0; }
+.context-results small { display: block; }
+.context-results .context-link { padding: 0; text-align: start; white-space: normal; color: var(--accent); }
 
 @media (max-width: 230px) {
   .conversation, .masthead, .activity, .workspace-tabs, .composer { padding-inline: 9px; }

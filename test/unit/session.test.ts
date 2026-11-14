@@ -116,3 +116,20 @@ test('disposing a paused run revokes the bridge, cancels the remote session and 
   assert.equal(session.state.phase, 'cancelled');
   assert.deepEqual(calls, ['register', 'session', 'revoke', 'cancel', 'close', 'remove']);
 });
+
+test('follow-ups reuse the session and chain from the completed turn until explicitly reset', async () => {
+  const starts: [string, string | undefined][] = [];
+  const { session, calls } = setup({ start: async function* (id, _prompt, _signal, previous) {
+    starts.push([id, previous]); yield created; yield done;
+  } });
+  await session.refresh();
+  await session.submit('first');
+  await session.submit('follow up');
+  assert.deepEqual(starts, [['session-1', undefined], ['session-1', 'turn-1']]);
+  assert.equal(calls.filter((call) => call === 'session').length, 1);
+  assert.equal(calls.filter((call) => call === 'remove').length, 2);
+  session.clear();
+  await session.submit('new conversation');
+  assert.equal(calls.filter((call) => call === 'session').length, 2);
+  await session.dispose();
+});

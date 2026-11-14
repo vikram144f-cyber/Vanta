@@ -5,6 +5,7 @@ import { parseStudioAction } from './protocol';
 import type { StudioUpdate } from './protocol';
 import { StudioSession } from './session';
 import { TrueForgeClient } from './trueforge';
+import { workspaceRepository, workspaceScope } from './editorRepository';
 
 class StudioView implements vscode.WebviewViewProvider {
   constructor(private readonly root: vscode.Uri, private readonly session: StudioSession) {}
@@ -40,11 +41,15 @@ class StudioView implements vscode.WebviewViewProvider {
           if (this.session.state.connection.status !== 'connected') void this.session.refresh();
           break;
         case 'refreshConnection': void this.session.refresh(); break;
-        case 'submitPrompt': void this.session.submit(action.text); break;
+        case 'submitPrompt': void this.session.submit(action.text, action.shareContext); break;
         case 'selectModel': this.session.selectModel(action.model); break;
         case 'cancelRun': void this.session.cancel(); break;
         case 'clearConversation': this.session.clear(); break;
         case 'decideApproval': void this.session.decide(action.id, action.allow); break;
+        case 'openContext':
+          if (this.session.hasLocation(action.path, action.line)) void openContext(action.path, action.line);
+          break;
+        case 'pickReference': void pickReference(webview); break;
       }
     });
     view.onDidDispose(() => {
@@ -67,6 +72,26 @@ class StudioView implements vscode.WebviewViewProvider {
   }
 }
 
+async function openContext(path: string, line: number) {
+  try {
+    const repo = await workspaceRepository();
+    if (!repo) return;
+    const uri = vscode.Uri.file(await repo.location(path, AbortSignal.timeout(1500)));
+    const position = new vscode.Position(line - 1, 0);
+    await vscode.window.showTextDocument(uri, { selection: new vscode.Range(position, position), preview: true });
+  } catch { void vscode.window.showWarningMessage('VANTA could not open this workspace location.'); }
+}
+
+async function pickReference(webview: vscode.Webview) {
+  try {
+    const repo = await workspaceRepository();
+    if (!repo) { void vscode.window.showInformationMessage('Open a trusted local folder to choose a file.'); return; }
+    const catalog = await repo.catalog(AbortSignal.timeout(5000));
+    const selected = await vscode.window.showQuickPick(catalog.paths, { placeHolder: 'Filter workspace files to insert an @file reference' });
+    if (selected) await webview.postMessage({ type: 'insertReference', text: `@file:"${selected}"` } satisfies StudioUpdate);
+  } catch { void vscode.window.showWarningMessage('VANTA could not list workspace files.'); }
+}
+
 let session: StudioSession | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
@@ -78,15 +103,16 @@ export function activate(context: vscode.ExtensionContext) {
         model: config.get('model', '').trim(),
         agentName: config.get('agentName', '').trim(),
         workspaceOverview: config.get('workspaceOverview', true),
+        contextBudget: Math.max(2000, Math.min(16000, Math.floor(config.get('contextBudget', 8000)) || 8000)),
       };
     },
     forge: (url) => new TrueForgeClient(url),
-    bridge: async (signal) => {
-      const [folder] = vscode.workspace.workspaceFolders ?? [];
-      const isAvailable = () => vscode.workspace.isTrusted && vscode.workspace.workspaceFolders?.length === 1
-        && vscode.workspace.workspaceFolders[0]?.uri.toString() === folder?.uri.toString();
-      if (!folder || folder.uri.scheme !== 'file' || !isAvailable()) return;
-      return startOverviewBridge({ path: folder.uri.fsPath, isAvailable }, signal);
+    scopeKey: () => workspaceScope()?.path ?? '',
+    repository: workspaceRepository,
+    bridge: async (signal, name, context) => {
+      const scope = workspaceScope();
+      if (!scope) return;
+      return startOverviewBridge(scope, signal, name, context);
     },
   });
   session = studio;
@@ -100,7 +126,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('vanta')) void studio.refresh();
     }),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => { void studio.cancel(); }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { void studio.workspaceChanged(); }),
   );
 }
 

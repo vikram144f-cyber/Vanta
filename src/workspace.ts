@@ -7,8 +7,18 @@ export interface WorkspaceScope {
   isAvailable(): boolean;
 }
 
-function normalizeDrive(path: string): string {
+export function normalizeDrive(path: string): string {
   return process.platform === 'win32' ? path.replace(/^[a-z]:/i, (drive) => drive.toUpperCase()) : path;
+}
+
+export async function bindRoot(scope: WorkspaceScope) {
+  const root = await verifyRoot(scope);
+  const initial = await stat(root);
+  return { root, verify: async () => {
+    if (await verifyRoot(scope) !== root) throw new VantaError('Workspace root changed.');
+    const current = await stat(root);
+    if (initial.ino !== current.ino || initial.dev !== current.dev) throw new VantaError('Workspace root was replaced.');
+  } };
 }
 
 async function verifyRoot(scope: WorkspaceScope): Promise<string> {
@@ -24,9 +34,9 @@ async function verifyRoot(scope: WorkspaceScope): Promise<string> {
 }
 
 export async function bindOverview(scope: WorkspaceScope) {
-  const root = await verifyRoot(scope);
+  const { root, verify } = await bindRoot(scope);
   return async () => {
-    if (await verifyRoot(scope) !== root) throw new VantaError('Workspace root changed.');
+    await verify();
     const files: string[] = [];
     const folders: string[] = [];
     let scanned = 0;

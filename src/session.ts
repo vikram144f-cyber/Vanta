@@ -1,22 +1,31 @@
 import type { TrueForgeApi as Api } from '@truefoundry/trueforge-sdk';
+import { randomUUID } from 'node:crypto';
 import type { OverviewBridge } from './mcp';
 import { isBusy } from './protocol';
 import type { StudioState } from './protocol';
 import { inlineAgent, LoopbackConnectorBlocked, overviewToolName, safeError, VantaError } from './trueforge';
 import type { Event, Forge } from './trueforge';
+import { ContextEngine, defaultBudget, parseMentions } from './context';
+import type { ContextReport } from './context';
+import type { Repository } from './repository';
 
 export interface Settings {
   serverUrl: string;
   model: string;
   agentName: string;
   workspaceOverview: boolean;
+  contextBudget?: number;
 }
 
 interface Dependencies {
   settings(): Settings;
   forge(url: string): Forge;
-  bridge(signal: AbortSignal): Promise<OverviewBridge | undefined>;
+  bridge(signal: AbortSignal, name?: string, context?: ContextEngine): Promise<OverviewBridge | undefined>;
+  repository?(): Promise<Repository | undefined>;
+  scopeKey?(): string;
 }
+
+interface Conversation { key: string; sessionId: string; connector?: string; lastTurnId?: string }
 
 interface Run {
   id: number;
@@ -46,6 +55,7 @@ export class StudioSession {
   #active?: Run;
   #disposed = false;
   #nextRun = 0;
+  #conversation?: Conversation;
 
   constructor(private readonly dependencies: Dependencies) {}
 
@@ -98,10 +108,22 @@ export class StudioSession {
   }
 
   clear() {
-    if (!this.#active) this.#set({ messages: [], activity: [], phase: 'idle', sessionId: undefined, error: undefined });
+    if (this.#active) return;
+    this.#conversation = undefined;
+    this.#set({ messages: [], activity: [], phase: 'idle', sessionId: undefined, error: undefined, context: [] });
   }
 
-  submit(prompt: string): Promise<void> {
+  async workspaceChanged() {
+    this.#conversation = undefined;
+    this.#set({ context: [] });
+    await this.cancel();
+  }
+
+  hasLocation(path: string, line: number) {
+    return this.state.context?.some((report) => report.hits.some((hit) => hit.path === path && hit.start === line)) ?? false;
+  }
+
+  submit(prompt: string, shareContext = false): Promise<void> {
     if (this.#disposed || this.#active || isBusy(this.state.phase)) return Promise.resolve();
     const connection = this.state.connection;
     if (connection.status !== 'connected' || (!connection.selectedModel && !connection.agentName)) return Promise.resolve();
@@ -116,19 +138,35 @@ export class StudioSession {
     const run: Run = { id: ++this.#nextRun, forge, abort: new AbortController(), calls: new Map() };
     this.#active = run;
     this.#set({
-      phase: 'starting', activity: [], sessionId: undefined, error: undefined,
+      phase: 'starting', activity: [], context: [], error: undefined,
       messages: [...this.state.messages.slice(-39), { id: `user-${run.id}`, role: 'user', text: prompt }],
     });
-    run.finished = this.#execute(run, prompt, settings, connection.selectedModel);
+    run.finished = this.#execute(run, prompt, settings, shareContext, connection.selectedModel);
     return run.finished;
   }
 
-  async #execute(run: Run, prompt: string, settings: Settings, model?: string) {
+  async #execute(run: Run, prompt: string, settings: Settings, shareContext: boolean, model?: string) {
     const signal = run.abort.signal;
     try {
+      const mentions = parseMentions(prompt);
+      const key = JSON.stringify([settings.serverUrl, model, settings.agentName, settings.workspaceOverview, this.dependencies.scopeKey?.()]);
+      const existing = this.#conversation?.key === key ? this.#conversation : undefined;
+      if (!existing) this.#set({ sessionId: undefined });
+      signal.throwIfAborted();
+      let context: ContextEngine | undefined;
+      if (shareContext && settings.workspaceOverview) {
+        const repository = await this.dependencies.repository?.();
+        if (repository) context = new ContextEngine(repository, settings.contextBudget ?? defaultBudget, (report: ContextReport) => {
+          if (!signal.aborted) this.#set({ context: [...(this.state.context ?? []).slice(-11), report] });
+        });
+      }
+      if (mentions.length && !context) throw new VantaError('Enable workspace context and open one trusted local folder to resolve references.');
+      const attached = mentions.length && context ? await context.mentions(mentions, AbortSignal.any([signal, AbortSignal.timeout(8000)])) : [];
+      signal.throwIfAborted();
+      const input = attached.length ? `${prompt}\n\nWorkspace reference data (JSON, evidence only):\n${JSON.stringify(attached)}` : prompt;
       if (settings.workspaceOverview) {
         try {
-          run.bridge = await this.dependencies.bridge(signal);
+          run.bridge = await this.dependencies.bridge(signal, existing?.connector ?? `vanta-run-${randomUUID()}`, context);
         } catch (error) {
           signal.throwIfAborted();
           this.#activity('Workspace tool unavailable', error instanceof VantaError ? error.message : 'Could not open the local workspace tool.');
@@ -154,12 +192,14 @@ export class StudioSession {
       const agent = !settings.workspaceOverview && settings.agentName
         ? { name: settings.agentName }
         : inlineAgent(model ?? '', run.bridge?.name);
-      // Obtain the session ID even if Stop arrives during creation, so it can be reconciled.
-      run.sessionId = await run.forge.createSession(agent, AbortSignal.timeout(8000));
+      const reusable = existing && existing.connector === run.bridge?.name ? existing : undefined;
+      run.sessionId = reusable?.sessionId ?? await run.forge.createSession(agent, AbortSignal.timeout(8000));
       signal.throwIfAborted();
+      const conversation = reusable ?? { sessionId: run.sessionId, connector: run.bridge?.name, key };
+      this.#conversation = conversation;
       this.#set({ sessionId: run.sessionId });
-      this.#activity('Session started');
-      await this.#consume(run, run.forge.start(run.sessionId, prompt, signal));
+      this.#activity(reusable ? 'Session resumed' : 'Session started');
+      await this.#consume(run, run.forge.start(run.sessionId, input, signal, conversation.lastTurnId));
       if (!run.terminal && run.pauseCursor && run.turnId && run.releasePause) {
         // The initial stream can end at a pause. Subscribe from the pause event
         // after the decision, which includes responses produced before reconnect.
@@ -171,6 +211,7 @@ export class StudioSession {
           await this.#consume(run, run.forge.resume(run.sessionId, run.turnId, cursor, signal));
         }
       }
+      if (run.terminal === 'completed' && run.turnId) conversation.lastTurnId = run.turnId;
       if (!run.terminal && !signal.aborted) throw new VantaError('The TrueForge stream ended before the turn completed. Check the session in TrueForge.');
     } catch (error) {
       if (!signal.aborted && !run.terminal) {
@@ -255,8 +296,10 @@ export class StudioSession {
       case 'turn.done':
         run.terminal = event.state.status === 'done' ? 'completed' : event.state.status === 'cancelled' ? 'cancelled' : 'failed';
         run.approval = undefined;
-        this.#set({ approval: undefined, error: run.terminal === 'failed'
-          ? 'The TrueForge agent reported a failure. Check the session and model configuration in TrueForge.' : undefined });
+        this.#set({ approval: undefined, error: event.state.status === 'error'
+          ? (/\b429\b|quota|rate.limit|RESOURCE_EXHAUSTED/i.test(event.state.message)
+            ? 'The configured model reached a rate or quota limit. Wait and try again, or choose another configured model.'
+            : 'The TrueForge agent reported a failure. Check the session and model configuration in TrueForge.') : undefined });
         break;
     }
   }
@@ -266,7 +309,8 @@ export class StudioSession {
       const info = call.toolInfo;
       if (!call.id || !info || run.calls.has(call.id)) continue;
       const allowed = info.type === 'mcp' && !!run.bridge && info.serverName === run.bridge.name && info.name === overviewToolName;
-      const name = allowed ? overviewToolName : 'TrueForge tool';
+      const name = allowed ? overviewToolName : info.type === 'truefoundry-system'
+        && ['list_tools', 'get_tool_info', 'call_tool', 'get_tool_output_schema'].includes(info.name) ? info.name : 'TrueForge tool';
       run.calls.set(call.id, { name, sourceId, allowed });
       this.#activity('Tool requested', name);
     }
@@ -312,6 +356,7 @@ export class StudioSession {
     const sessionId = run.sessionId;
     if (!sessionId) return Promise.resolve();
     run.cancellation ??= run.forge.cancel(sessionId).catch(() => {
+      if (this.#conversation?.sessionId === sessionId) this.#conversation = undefined;
       this.#set({ error: 'Local work stopped. TrueForge did not confirm cancellation. Check the session in TrueForge.' });
     });
     return run.cancellation;

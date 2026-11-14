@@ -11,12 +11,17 @@ const titles = { checking: 'Connecting', connected: 'Connected', offline: 'Offli
 function Studio() {
   const [state, setState] = useState<StudioState>();
   const [draft, setDraft] = useState('');
+  const [shareContext, setShareContext] = useState(false);
   const log = useRef<HTMLElement>(null);
   const atBottom = useRef(true);
   const prompt = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     const receive = ({ data }: MessageEvent<StudioUpdate>) => {
       if (data?.type === 'snapshot') setState(data.state);
+      if (data?.type === 'insertReference') {
+        setDraft((value) => `${value.trimEnd()} ${data.text} `.trimStart());
+        prompt.current?.focus();
+      }
     };
     window.addEventListener('message', receive);
     host.postMessage({ type: 'ready' });
@@ -36,8 +41,9 @@ function Studio() {
   function send() {
     if (!canSend || !draft.trim()) return;
     atBottom.current = true;
-    host.postMessage({ type: 'submitPrompt', text: draft });
+    host.postMessage({ type: 'submitPrompt', text: draft, shareContext });
     setDraft('');
+    setShareContext(false);
   }
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -104,7 +110,28 @@ function Studio() {
       </ol>}
     </details>
     <section className="workspace-tabs" aria-label="Workspace features">
-      {['Context Explorer', 'Changes', 'Test Results'].map((label) => <details key={label}>
+      <details className="context-explorer" open={state.context?.length ? true : undefined}>
+        <summary>Context Explorer</summary>
+        {!state.context?.length && <p>Enable workspace context to share snippets and see how files were selected.</p>}
+        {!!state.context?.length && <>
+          <p>{state.context.at(-1)?.estimatedTokens.toLocaleString()} / {state.context.at(-1)?.budget.toLocaleString()} estimated tokens this turn</p>
+          <div className="context-results">
+            {state.context.map((report, index) => <section key={index}>
+              <h2>{report.operation}{report.backend && ` · ${report.backend}`}</h2>
+              {report.limited && <p>Scan or result limit reached.</p>}
+              {report.omitted > 0 && <p>{report.omitted} skipped to stay within budget.</p>}
+              {report.hits.length === 0 && <p>No new matching locations.</p>}
+              <ul>{report.hits.map((hit, hitIndex) => <li key={hitIndex}>
+                <button type="button" className="subtle context-link" onClick={() => host.postMessage({ type: 'openContext', path: hit.path, line: hit.start })}>
+                  {hit.path}:{hit.start}{hit.end > hit.start && `–${hit.end}`}
+                </button>
+                <small>{hit.selected ? 'Returned' : 'Budget skipped'} · {hit.symbol && `${hit.symbol} · `}{hit.reason}</small>
+              </li>)}</ul>
+            </section>)}
+          </div>
+        </>}
+      </details>
+      {['Changes', 'Test Results'].map((label) => <details key={label}>
         <summary>{label}</summary><p>Not available yet</p>
       </details>)}
     </section>
@@ -113,11 +140,18 @@ function Studio() {
       <label className="sr-only" htmlFor="prompt">Message VANTA</label>
       <textarea id="prompt" ref={prompt} rows={3} maxLength={12_000} placeholder="Message VANTA…" value={draft}
         onChange={(event) => setDraft(event.currentTarget.value)} onKeyDown={onPromptKey} />
+      <div className="composer-context">
+        <label title="Share eligible filenames, symbols and snippets with TrueForge and its model for this turn">
+          <input type="checkbox" checked={shareContext} disabled={busy} onChange={(event) => setShareContext(event.currentTarget.checked)} /> Share workspace context
+        </label>
+        <button type="button" className="subtle" disabled={busy} onClick={() => host.postMessage({ type: 'pickReference' })}>Add file…</button>
+      </div>
+      {state.sessionId && <p className="muted context-note">Follow-ups can use context shared earlier in this conversation.</p>}
       <div className="composer-footer">
         <button type="button" className="subtle" disabled={busy || !messages.length} onClick={() => {
           host.postMessage({ type: 'clearConversation' });
           prompt.current?.focus();
-        }}>Clear view</button>
+        }}>New conversation</button>
         {busy ? <button type="button" disabled={phase === 'cancelling'} onClick={() => host.postMessage({ type: 'cancelRun' })}>Stop</button>
           : <button className="primary" disabled={!canSend || !draft.trim()} type="submit">Send</button>}
       </div>
