@@ -33,6 +33,7 @@ function Studio() {
 
   if (!state) return <main className="boot" role="status">Opening Agent Studio…</main>;
   const { connection, messages, activity, phase, approval, sessionId, error } = state;
+  const review = state.review;
   const busy = isBusy(phase);
   const canSend = !busy && connection.status === 'connected' && !!(connection.selectedModel || connection.agentName);
   const status = phase === 'approval' ? 'Waiting for approval' : phase === 'cancelling' ? 'Cancelling'
@@ -102,6 +103,31 @@ function Studio() {
       </div>
     </section>}
 
+    {review && <section className="approval quick-review" aria-label="Quick Edit review">
+      <h2>Review Quick Edit</h2>
+      <p>{review.path} · {review.explanation}</p>
+      <p>{review.hunks.filter((hunk) => hunk.status === 'pending').length} pending</p>
+      <div className="button-row">
+        <button type="button" disabled={review.current <= 1} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: review.current - 1, decision: 'view' })}>Previous hunk</button>
+        <button type="button" disabled={review.current >= review.hunks.length} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: review.current + 1, decision: 'view' })}>Next hunk</button>
+      </div>
+      <ol className="quick-hunks">{review.hunks.map((hunk) => <li key={hunk.id}>
+        <button type="button" className="subtle" aria-current={review.current === hunk.id ? 'true' : undefined}
+          onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: hunk.id, decision: 'view' })}>Hunk {hunk.id} · line {hunk.line} · {hunk.status}</button>
+        <div className="button-row">
+          <button type="button" aria-label={`Accept hunk ${hunk.id}`} aria-pressed={hunk.status === 'accepted'} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: hunk.id, decision: 'accepted' })}>Accept</button>
+          <button type="button" aria-label={`Reject hunk ${hunk.id}`} aria-pressed={hunk.status === 'rejected'} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: hunk.id, decision: 'rejected' })}>Reject</button>
+        </div>
+      </li>)}</ol>
+      <div className="button-row">
+        <button type="button" disabled={!review.hunks.some((hunk) => hunk.status === 'pending')}
+          onClick={() => host.postMessage({ type: 'rejectRemaining', id: review.id })}>Reject remaining</button>
+        <button type="button" className="primary" disabled={review.hunks.some((hunk) => hunk.status === 'pending') || !review.hunks.some((hunk) => hunk.status === 'accepted')}
+          onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: true })}>Apply accepted changes</button>
+        <button type="button" onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: false })}>Discard proposal</button>
+      </div>
+    </section>}
+
     <details className="activity" open={activity.length ? true : undefined}>
       <summary>Agent activity</summary>
       {sessionId && <p className="session" title={sessionId}>Session <code>{sessionId}</code></p>}
@@ -146,7 +172,7 @@ function Studio() {
         </label>
         <button type="button" className="subtle" disabled={busy} onClick={() => host.postMessage({ type: 'pickReference' })}>Add file…</button>
       </div>
-      {state.sessionId && <p className="muted context-note">Follow-ups can use context shared earlier in this conversation.</p>}
+      {state.sessionId && <p className="muted context-note">{state.quickEdit ? 'Quick Edit uses a separate TrueForge session.' : 'Follow-ups can use context shared earlier in this conversation.'}</p>}
       <div className="composer-footer">
         <button type="button" className="subtle" disabled={busy || !messages.length} onClick={() => {
           host.postMessage({ type: 'clearConversation' });

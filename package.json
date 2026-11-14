@@ -64,6 +64,9 @@
         "title": "VANTA: Cancel Current Run"
       }
     ],
+    "menus": {
+      "editor/context": [{ "command": "vanta.quickEdit", "when": "editorHasSelection && !editorReadonly && resourceScheme == file", "group": "1_modification" }]
+    },
     "keybindings": [
       {
         "command": "vanta.quickEdit",
@@ -123,6 +126,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.0",
     "@truefoundry/trueforge-sdk": "0.185.0",
+    "diff": "9.0.0",
     "ignore": "7.0.14",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

@@ -170,6 +170,11 @@ export class Repository {
     return checked.path;
   }
 
+  async diskText(path: string, signal: AbortSignal): Promise<string> {
+    await this.location(path, signal);
+    return this.#readBytes(path, signal, maxFileBytes);
+  }
+
   relative(absolute: string): string | undefined {
     const path = relative(this.root, absolute).split(sep).join('/');
     return safeRelativePath(path) ? path : undefined;

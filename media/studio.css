@@ -54,6 +54,10 @@ select, textarea { width: 100%; }
 .error { color: var(--vscode-errorForeground); }
 .approval { margin: 0 14px 8px; padding: 9px 10px; border: 1px solid var(--accent); border-radius: 6px; }
 .button-row { justify-content: flex-start; margin-top: 8px; flex-wrap: wrap; }
+.quick-review { overflow: auto; max-height: 44dvh; flex-shrink: 0; }
+.quick-hunks { list-style: none; padding: 0; margin: 6px 0; }
+.quick-hunks li { padding: 4px 0; border-bottom: 1px solid var(--line); }
+.quick-hunks [aria-pressed=true], .quick-hunks [aria-current=true] { border-color: var(--accent); }
 .activity, .workspace-tabs { padding: 7px 14px; border-top: 1px solid var(--line); }
 .activity summary, .workspace-tabs summary { font-size: .89rem; font-weight: 600; }
 .activity ol { margin: 5px 0 0; max-height: min(110px, 20dvh); overflow-y: auto; list-style: none; padding: 0; }

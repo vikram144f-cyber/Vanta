@@ -6,6 +6,11 @@ import type { StudioUpdate } from './protocol';
 import { StudioSession } from './session';
 import { TrueForgeClient } from './trueforge';
 import { workspaceRepository, workspaceScope } from './editorRepository';
+import { QuickEdit, quickEditScheme } from './quickEdit';
+
+function contextBudget() {
+  return Math.max(2000, Math.min(16000, Math.floor(vscode.workspace.getConfiguration('vanta').get('contextBudget', 8000)) || 8000));
+}
 
 class StudioView implements vscode.WebviewViewProvider {
   constructor(private readonly root: vscode.Uri, private readonly session: StudioSession) {}
@@ -46,6 +51,9 @@ class StudioView implements vscode.WebviewViewProvider {
         case 'cancelRun': void this.session.cancel(); break;
         case 'clearConversation': this.session.clear(); break;
         case 'decideApproval': void this.session.decide(action.id, action.allow); break;
+        case 'reviewHunk': void this.session.reviewHunk(action.id, action.hunk, action.decision); break;
+        case 'finishReview': void this.session.finishReview(action.id, action.apply); break;
+        case 'rejectRemaining': this.session.rejectRemaining(action.id); break;
         case 'openContext':
           if (this.session.hasLocation(action.path, action.line)) void openContext(action.path, action.line);
           break;
@@ -103,25 +111,26 @@ export function activate(context: vscode.ExtensionContext) {
         model: config.get('model', '').trim(),
         agentName: config.get('agentName', '').trim(),
         workspaceOverview: config.get('workspaceOverview', true),
-        contextBudget: Math.max(2000, Math.min(16000, Math.floor(config.get('contextBudget', 8000)) || 8000)),
+        contextBudget: contextBudget(),
       };
     },
     forge: (url) => new TrueForgeClient(url),
     scopeKey: () => workspaceScope()?.path ?? '',
     repository: workspaceRepository,
-    bridge: async (signal, name, context) => {
+    bridge: async (signal, name, context, quick) => {
       const scope = workspaceScope();
       if (!scope) return;
-      return startOverviewBridge(scope, signal, name, context);
+      return startOverviewBridge(scope, signal, name, context, quick);
     },
   });
   session = studio;
+  const quickEdit = new QuickEdit(studio, contextBudget);
   context.subscriptions.push(
+    quickEdit,
+    vscode.workspace.registerTextDocumentContentProvider(quickEditScheme, quickEdit),
     vscode.window.registerWebviewViewProvider('vanta.studio', new StudioView(context.extensionUri, studio)),
     vscode.commands.registerCommand('vanta.openStudio', () => vscode.commands.executeCommand('vanta.studio.focus')),
-    vscode.commands.registerCommand('vanta.quickEdit', () => {
-      void vscode.window.showInformationMessage('VANTA Quick Edit will be available when editor review is implemented.');
-    }),
+    vscode.commands.registerCommand('vanta.quickEdit', () => quickEdit.run()),
     vscode.commands.registerCommand('vanta.cancelRun', () => studio.cancel()),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('vanta')) void studio.refresh();

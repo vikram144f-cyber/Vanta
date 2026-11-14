@@ -38,6 +38,9 @@ export interface StudioState {
   approval?: Approval;
   error?: string;
   context?: ContextReport[];
+  quickEdit?: boolean;
+  review?: { id: string; path: string; explanation: string; current: number;
+    hunks: { id: number; line: number; status: 'pending' | 'accepted' | 'rejected' }[] };
 }
 
 export type StudioAction =
@@ -45,6 +48,9 @@ export type StudioAction =
   | { type: 'submitPrompt'; text: string; shareContext?: boolean }
   | { type: 'selectModel'; model: string }
   | { type: 'openContext'; path: string; line: number }
+  | { type: 'reviewHunk'; id: string; hunk: number; decision: 'accepted' | 'rejected' | 'view' }
+  | { type: 'finishReview'; id: string; apply: boolean }
+  | { type: 'rejectRemaining'; id: string }
   | { type: 'decideApproval'; id: string; allow: boolean };
 
 export type StudioUpdate = { type: 'snapshot'; state: StudioState } | { type: 'insertReference'; text: string };
@@ -78,6 +84,21 @@ export function parseStudioAction(value: unknown): StudioAction | undefined {
       if ('id' in value && typeof value.id === 'string' && value.id.length <= 256 && 'allow' in value && typeof value.allow === 'boolean') {
         return { type: value.type, id: value.id, allow: value.allow };
       }
+      return;
+    case 'reviewHunk':
+      if ('id' in value && typeof value.id === 'string' && value.id.length === 36 && 'hunk' in value
+        && typeof value.hunk === 'number' && Number.isInteger(value.hunk) && value.hunk > 0 && value.hunk <= 60
+        && 'decision' in value && (value.decision === 'accepted' || value.decision === 'rejected' || value.decision === 'view')) {
+        return { type: value.type, id: value.id, hunk: value.hunk, decision: value.decision };
+      }
+      return;
+    case 'finishReview':
+      if ('id' in value && typeof value.id === 'string' && value.id.length === 36 && 'apply' in value && typeof value.apply === 'boolean') {
+        return { type: value.type, id: value.id, apply: value.apply };
+      }
+      return;
+    case 'rejectRemaining':
+      if ('id' in value && typeof value.id === 'string' && value.id.length === 36) return { type: value.type, id: value.id };
       return;
     default:
       return;

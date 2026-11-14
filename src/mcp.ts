@@ -9,6 +9,13 @@ import { overviewToolName, VantaError } from './trueforge';
 import { bindOverview } from './workspace';
 import type { WorkspaceScope } from './workspace';
 import type { ContextEngine } from './context';
+import { proposeTool, proposalSchema, reviewSchema, reviewTool } from './quickPatch';
+import type { QuickPatch, ReviewReceipt } from './quickPatch';
+
+export interface QuickTools {
+  stage(replacement: string, explanation: string): QuickPatch;
+  receipt(id: string): ReviewReceipt;
+}
 
 export interface OverviewBridge extends Connector {
   grant(): void;
@@ -28,7 +35,7 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
 }
 
-export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSignal, name = `vanta-run-${randomUUID()}`, context?: ContextEngine): Promise<OverviewBridge> {
+export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSignal, name = `vanta-run-${randomUUID()}`, context?: ContextEngine, quick?: QuickTools): Promise<OverviewBridge> {
   signal.throwIfAborted();
   const overview = await bindOverview(scope);
   signal.throwIfAborted();
@@ -117,6 +124,25 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
       description: 'Rank relevant repository locations for a natural-language task, with bounded snippets and selection reasons. Use for unexplored tasks involving code, tests and documentation.',
       inputSchema: { query }, annotations: readOnly,
     }, (args) => expose((repo, deadline) => repo.bundle(args.query, deadline)));
+    if (quick) {
+      const edit = (operation: () => unknown) => {
+        if (closed || signal.aborted || !scope.isAvailable()) return failure('The Quick Edit scope ended.');
+        try { return { content: [{ type: 'text' as const, text: JSON.stringify(operation()) }] }; }
+        catch (error) { return failure(error instanceof VantaError ? error.message : 'Could not stage the Quick Edit.'); }
+      };
+      server.registerTool(proposeTool, {
+        description: 'Stage a replacement for exactly the captured selection. Supply the full replacement for the selection, preserving unchanged text, indentation and edge newlines. Return the proposal ID for review.',
+        inputSchema: proposalSchema, annotations: readOnly,
+      }, ({ replacement, explanation }) => edit(() => {
+        const patch = quick.stage(replacement, explanation);
+        return { proposalId: patch.id, path: patch.base.path, version: patch.base.version, originalFingerprint: patch.baseDigest,
+          explanation: patch.explanation, hunks: patch.hunks.map(({ id, start, end, replacement }) => ({ id, start, end, replacement })) };
+      }));
+      server.registerTool(reviewTool, {
+        description: 'Ask the user to review a staged Quick Edit proposal by exact proposal ID. This checkpoint returns a receipt and cannot write to the workspace.',
+        inputSchema: reviewSchema, annotations: readOnly,
+      }, ({ proposalId }) => edit(() => quick.receipt(proposalId)));
+    }
     response.once('close', () => { void server.close().catch(() => undefined); });
     void (async () => {
       const body = await readJson(request);

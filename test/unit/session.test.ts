@@ -5,6 +5,10 @@ import { parseStudioAction } from '../../src/protocol';
 import { StudioSession } from '../../src/session';
 import { localServerUrl, overviewToolName } from '../../src/trueforge';
 import type { ApprovalEvent, Event, Forge } from '../../src/trueforge';
+import type { QuickTools } from '../../src/mcp';
+import type { QuickEditTarget } from '../../src/session';
+import { applyHunks, reviewTool } from '../../src/quickPatch';
+import type { ReviewReceipt } from '../../src/quickPatch';
 
 const model = 'fixture/model';
 const createdAt = '2026-11-14T00:00:00.000Z';
@@ -17,7 +21,7 @@ const source: Event = {
 };
 const pending: Event = { type: 'tool.approval_required', id: 'pending', createdAt, threadId: 'main', toolCalls: [{ id: 'tool', sourceEventId: 'source' }] };
 
-function setup(overrides: Partial<Forge> = {}) {
+function setup(overrides: Partial<Forge> = {}, edit?: (tools: QuickTools) => void) {
   const calls: string[] = [];
   const decisions: ApprovalEvent[] = [];
   const bridge: OverviewBridge = {
@@ -39,7 +43,7 @@ function setup(overrides: Partial<Forge> = {}) {
   const session = new StudioSession({
     settings: () => ({ serverUrl: 'http://localhost:8790', model, agentName: '', workspaceOverview: true }),
     forge: () => forge,
-    bridge: async () => bridge,
+    bridge: async (_signal, _name, _context, tools) => { if (tools) edit?.(tools); return bridge; },
   });
   return { session, calls, decisions };
 }
@@ -51,6 +55,84 @@ test('webview actions validate text and approval payloads', () => {
   assert.equal(parseStudioAction({ type: 'decideApproval', id: 'other', allow: 'yes' }), undefined);
   assert.deepEqual(parseStudioAction({ type: 'decideApproval', id: 'id', allow: false }), { type: 'decideApproval', id: 'id', allow: false });
 });
+
+for (const mode of ['apply', 'discard', 'early cancel', 'stream cancel', 'staged cancel', 'pause cancel', 'missing receipt', 'stale'] as const) {
+  test(`Quick Edit state machine · ${mode}`, async () => {
+    let tools: QuickTools | undefined;
+    let proposalId = '';
+    let receipt: ReviewReceipt | undefined;
+    let transferred: ApprovalEvent | undefined;
+    const original = 'one\nkeep\nthree\n';
+    let buffer = original;
+    const base = { path: 'source.py', version: 1, text: original, start: 0, end: original.length, eol: '\n' as const };
+    const requireTools = () => { assert.ok(tools); return tools; };
+    const harness = setup({
+      start: async function* () {
+        if (mode === 'early cancel') { await harness.session.cancel(); return; }
+        yield created;
+        if (mode === 'stream cancel') {
+          yield { type: 'model.message.delta', id: 'text', threadId: 'main', content: 'Planning' };
+          await harness.session.cancel();
+          return;
+        }
+        proposalId = requireTools().stage('ONE\nkeep\nTHREE\n', 'Change two lines').id;
+        if (mode === 'staged cancel') { await harness.session.cancel(); return; }
+        yield { type: 'model.message', id: 'source', threadId: 'main', createdAt };
+        yield { type: 'model.message.delta', id: 'source', threadId: 'main', toolCalls: [{ index: 0, id: 'tool', type: 'function',
+          toolInfo: { type: 'mcp', name: reviewTool, serverName: 'connector', serverId: 'connector' },
+          function: { name: reviewTool, arguments: '{"proposalId":"' } }] };
+        yield { type: 'model.message.delta', id: 'source', threadId: 'main', toolCalls: [{ index: 0, function: { arguments: `${proposalId}"}` } }] };
+        yield pending;
+        yield pending;
+      },
+      approve: async (_sessionId, _turnId, decision) => {
+        transferred = decision;
+        if (decision.approval.status === 'allow' && mode !== 'missing receipt') receipt = requireTools().receipt(proposalId);
+      },
+      resume: async function* () {
+        if (transferred) yield { ...transferred, id: 'approval', createdAt };
+        if (receipt) yield { type: 'tool.response', id: 'receipt', threadId: 'main', toolCallId: 'tool', content: JSON.stringify(receipt), createdAt };
+        yield done;
+      },
+    }, (value) => { tools = value; });
+    const { session } = harness;
+    let reviewId = '';
+    const target: QuickEditTarget = { base, evidence: '{"selected":"fixture"}', verify: async () => {
+      if (mode === 'stale' && reviewId) throw new Error('stale');
+    }, preview: async () => { assert.equal(buffer, original); }, apply: async (hunks, _digest, _signal, commit) => {
+      commit();
+      buffer = applyHunks(base, hunks);
+    } };
+    await session.refresh();
+    const shown = new Promise<string>((resolve) => session.listen(() => {
+      if (session.state.review) resolve(session.state.review.id);
+    }));
+    const running = session.submit('Edit', true, target);
+    if (!['early cancel', 'stream cancel', 'staged cancel'].includes(mode)) {
+      reviewId = await shown;
+      assert.throws(() => requireTools().receipt(proposalId), /authorization/);
+      await session.decide('tool', true); // Overview controls cannot approve a patch.
+      assert.equal(transferred, undefined);
+      assert.equal(buffer, original);
+      if (mode === 'pause cancel') await session.cancel();
+      else if (mode === 'discard') await session.finishReview(reviewId, false);
+      else {
+        await session.reviewHunk(reviewId, 1, 'rejected');
+        await session.reviewHunk(reviewId, 2, 'accepted');
+        await session.finishReview(reviewId, true);
+        if (mode === 'stale') { assert.ok(session.state.error); await session.cancel(); }
+      }
+    }
+    await running;
+    assert.equal(buffer, mode === 'apply' ? 'one\nkeep\nTHREE\n' : original);
+    assert.equal(session.state.review, undefined);
+    if (mode === 'missing receipt') assert.equal(session.state.phase, 'failed');
+    if (mode === 'discard') assert.equal((transferred as ApprovalEvent | undefined)?.approval.status, 'deny');
+    if (mode.includes('cancel')) assert.equal(session.state.phase, 'cancelled');
+    await session.cancel();
+    await session.dispose();
+  });
+}
 
 test('server settings reject non-local endpoints and embedded credentials', () => {
   assert.equal(localServerUrl('http://localhost:8790').origin, 'http://localhost:8790');

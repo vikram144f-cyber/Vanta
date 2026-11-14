@@ -10,6 +10,7 @@ import { overviewToolName } from '../../src/trueforge';
 import { bindOverview } from '../../src/workspace';
 import { ContextEngine, contextTools } from '../../src/context';
 import { Repository } from '../../src/repository';
+import { QuickPatch, proposeTool, reviewTool } from '../../src/quickPatch';
 
 test('workspace overview stays in the trusted root and filters names', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'vanta-root-'));
@@ -78,6 +79,45 @@ test('authorized HTTP repository reads are bounded and reject traversal', async 
     assert.match(JSON.stringify(result.content), /return 42/);
     assert.doesNotMatch(JSON.stringify(result.content), /def sample/);
     assert.equal((await client.callTool({ name: 'read_file', arguments: { path: '../sample.py' } })).isError, true);
+  } finally {
+    await client.close();
+    await bridge.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('MCP proposal stages in memory and a review call cannot authorize itself', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vanta-mcp-edit-'));
+  const scope = { path: root, isAvailable: () => true };
+  const abort = new AbortController();
+  let patch: QuickPatch | undefined;
+  const text = 'first\nkeep\nlast\n';
+  const bridge = await startOverviewBridge(scope, abort.signal, undefined, undefined, {
+    stage: (replacement, explanation) => {
+      patch = new QuickPatch({ path: 'source.py', text, version: 1, start: 0, end: text.length, eol: '\n' }, explanation, replacement);
+      return patch;
+    },
+    receipt: (id) => patch!.consume(id),
+  });
+  const client = new Client({ name: 'local-test', version: '1.0.0' });
+  try {
+    await writeFile(join(root, 'source.py'), text);
+    await client.connect(new StreamableHTTPClientTransport(new URL(bridge.url), { requestInit: { headers: { Authorization: bridge.authorization } } }));
+    const invalid = await client.callTool({ name: proposeTool, arguments: { replacement: '', explanation: 'out of scope', path: '../elsewhere' } });
+    assert.equal(invalid.isError, true);
+    const proposal = await client.callTool({ name: proposeTool, arguments: { replacement: 'FIRST\nkeep\nLAST\n', explanation: 'Two changes' } });
+    assert.equal(proposal.isError, undefined);
+    assert.ok(patch);
+    const args = { name: reviewTool, arguments: { proposalId: patch.id } };
+    assert.equal((await client.callTool(args)).isError, true);
+    patch.decide(1, 'rejected');
+    patch.decide(2, 'accepted');
+    patch.authorize();
+    const review = await client.callTool(args);
+    assert.match(JSON.stringify(review.content), /accepted.*2/);
+    assert.equal((await client.callTool(args)).isError, true);
+    const repo = await Repository.bind(scope, { ripgrep: false });
+    assert.equal(await repo.diskText('source.py', abort.signal), text);
   } finally {
     await client.close();
     await bridge.close();
