@@ -106,3 +106,5 @@ Windows Agent Studio submitted the exact Task B prompt once through TrueForge v0
 Session `01m7hr7emmfcv2k133qavgp8x9` ended after 22.7 seconds with `[Model Error] Request failed (500): Internal error encountered.` The trace contained only `turn.created`, `mcp.initialize` and `turn.done`, with zero reported model tokens. The provider response did not identify a cause beyond HTTP 500. No quota error was reported.
 
 The run stopped before repository discovery or staging. No native diff, human hunk approval, pytest approval or pytest result was produced. Nothing was applied or saved, and the final Flask CLI checks were not run. The pinned checkout remained clean. Task B remains unverified, and the run was not retried.
+
+In a separately requested retry using the same Gemma profile and verbatim prompt, session `01m7hrdphy5j3q2bpa8f3c2qh4` ended after 45.4 seconds with the same HTTP 500 and the same three lifecycle events. There were no tool calls, staged files, approvals, tests, or applied or saved changes. The pinned Flask checkout remained clean.
