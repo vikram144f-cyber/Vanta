@@ -178,3 +178,11 @@ One new Flash Lite run on stock TrueForge v0.185.1 submitted the unmodified offi
 Offline reconstruction from those staging arguments failed Python syntax at staged `src/flask/cli.py:1102` with `IndentationError: unexpected indent`. The second CLI hunk inserts `config_command` after the `click.echo` in the `if not rules` branch of `routes_command`, before that branch's existing `return`. The candidate still matches sensitive strings case-sensitively. The new test invokes `testapp.cli` and checks only `SECRET_KEY`. Syntax failure stopped the independent review before CLI execution.
 
 Native Discard recorded `deny` as approval event `01m7jbajb58s1wkx5sppvc4ntt` for `review_changes`. TrueForge cancelled the run after the model asked for review again. There were zero approvals. Pytest did not run, and no candidate edits were applied or saved. The pinned checkout remained clean. Task B is still open.
+
+### One requested Flash Lite rerun
+
+The verbatim Task B prompt ran in session `01m7jbfmbf590jy4vd3hxqxwt8`, turn `01m7jbfmcam4pvf9sz154wffkj`, on stock TrueForge v0.185.1. Flash Lite independently located the implementation, tests and documentation, then staged four hunks across `src/flask/cli.py`, `tests/test_cli.py` and `docs/cli.rst`. It reached native review in five tool calls and 18.8 seconds without a provider error.
+
+The pre-approval replay reconstructed the proposal from the successful staging arguments. The model again used the `click.echo("No routes were registered.")` anchor inside `routes_command` and inserted the new command before the indented `return`. Python reported `IndentationError: unexpected indent` at staged `src/flask/cli.py:1095`. The new command also used case-sensitive matching, and the proposed test invoked the plain `CliRunner` without a CLI command object. The proposal could not proceed to independent CLI execution or pytest.
+
+Native Discard produced deny event `01m7jbhf4yp5atnzj2rwezsnab`. The model tried to reopen review and TrueForge cancelled the run. No approval was granted, pytest did not run, and nothing was applied or saved. Git confirmed the pinned checkout was clean. No additional model turn was submitted.
