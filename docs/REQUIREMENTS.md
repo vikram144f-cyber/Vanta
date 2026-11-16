@@ -28,7 +28,7 @@ M3 implements and tests the read-only retrieval path for F3 and B1, and exercise
 
 M4 implements the selection-scoped path for F1 and F4, and exercises native TrueForge approval for the B4 review requirement. [Task A and safety evidence](M4_VERIFICATION.md).
 
-M5 implements existing-file Agent Mode, with separate TrueForge gates for patch review and a pytest profile. Local and live evidence for MCP-03, TF-04, DEMO-B and DEMO-GENERIC is tracked in the [M5 verification report](M5_VERIFICATION.md).
+M5 implements existing-file Agent Mode, with separate TrueForge gates for patch review and a pytest profile. DEMO-B acceptance requires the exact Flask prompt to reach both gates and pass the saved-result checks. See the [M5 verification report](M5_VERIFICATION.md) for current evidence for MCP-03, TF-04, DEMO-B and DEMO-GENERIC.
 
 | ID | Requirement and PDF page | Delivery and verification |
 | --- | --- | --- |

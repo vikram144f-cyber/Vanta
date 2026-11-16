@@ -33,7 +33,7 @@ foreach ($value in 'off', 'OFF', 'Off', 'n', 'N', '0', 'false', 'no') {
 Remove-Item Env:FLASK_DEBUG -ErrorAction SilentlyContinue
 ```
 
-5. Press **Ctrl+Z** in the source editor and save. Confirm that `git status --porcelain` is empty again. For a partial review rehearsal, accept one hunk and reject the other, apply, inspect the saved diff, then undo and save again.
+5. Run **VANTA: Undo Last Quick Edit** and save. Confirm that `git status --porcelain` is empty again. For a partial review rehearsal, accept one hunk and reject the other, apply, inspect the saved diff, then undo and save again.
 
 ## Checks
 
@@ -44,5 +44,13 @@ Remove-Item Env:FLASK_DEBUG -ErrorAction SilentlyContinue
 | Windows extension integration | Activated and executed its commands, captured a dirty editor buffer, applied one of two proposed hunks and restored the earlier unsaved user change with native Undo. |
 | M3 live regression | Gemini Flash Lite streamed real text, passed overview Allow/Reject/Stop, and returned Flask implementation, test and documentation locations with genuine deferred tool events. Follow-up symbol discovery and explicit mentions reused the same session. |
 | Context Explorer | The live discovery suite observed returned Flask locations and selection reasons in the host state. The Windows sidebar rendered real results after Quick Edit, and clicking the CLI result opened `src/flask/cli.py` in the editor. |
+
+## Later Task A regression and targeted undo
+
+A later native retest in TrueForge session `01m7d1m6gaphjx2w5bwjkvvk7h` reached the deferred review gate and applied the two displayed hunks after approval. Twelve runtime cases passed, but the generated docstring omitted the empty and unset inputs. The UI undo attempt did not restore the saved file; the rehearsal source was restored from the pinned commit and its original SHA-256 was checked. This retest does not confirm the documentation requirement.
+
+The continuation added **VANTA: Undo Last Quick Edit**, which retains the applied buffer snapshot and refuses undo if the document version, buffer contents, trust scope, or disk contents have changed unexpectedly. The Windows Extension Host test on VS Code 1.146.0 passed the saved-file case from a different active editor, verified the disk after saving the undo, and confirmed a later user edit is preserved by refusing stale undo. This local test does not replace a successful native Task A retest.
+
+On 2026-11-16, Gemini Flash Lite Latest session `01m7hdr8aqr65abbyg3b0kdd8g` reached the native review with two hunks. The logic added both requested values, but the docstring again omitted the empty and unset cases. The tester discarded the proposal at review. A subsequent run with the original passing model, Gemini 3.5 Flash, timed out before producing a proposal (`01m7hdtgpfezvfdqhq8pn6w3sf`). The helper file retained its baseline SHA-256 and the Flask checkout was clean after both runs.
 
 The local suites use deterministic fixtures. The live regression evidence comes from `test/live/flask.test.ts` and `test/live/trueforge.test.ts`. The real Quick Edit check uses the Windows Development Host, the production command and actual provider responses. [Design and scope](QUICK_EDIT.md).

@@ -60,3 +60,44 @@ test('scoped repository discovery, symbols, mentions and budget', async () => {
     await assert.rejects(repository.read('src/router.py', signal), /trusted/);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
+
+test('Agent Mode bundle includes nearby implementation, test, and documentation landmarks', async () => {
+  const folder = await mkdtemp(join(tmpdir(), 'vanta-agent-context-'));
+  const root = join(folder, 'repo');
+  const signal = new AbortController().signal;
+  try {
+    for (const path of ['src/flask', 'tests', 'docs']) await mkdir(join(root, path), { recursive: true });
+    const code = Array.from({ length: 90 }, (_, index) => `# unrelated implementation line ${index + 1}`);
+    code[19] = '@app.cli.command("config")';
+    code[20] = 'def config_command():';
+    code[21] = '    return {"ok": True}';
+    code[50] = '# config command JSON SECRET masking';
+    code[74] = '@app.cli.command("unrelated")';
+    code[75] = 'def unrelated_command():';
+    code[78] = 'app.cli.add_command(config_command)';
+    const tests = Array.from({ length: 45 }, (_, index) => `# unrelated test line ${index + 1}`);
+    tests[0] = 'def test_config_command():';
+    tests[30] = '    assert "config command JSON SECRET masking"';
+    const docs = Array.from({ length: 45 }, (_, index) => `CLI notes ${index + 1}`);
+    docs[24] = 'Usage details';
+    docs[25] = '----------------------';
+    docs[29] = 'The config command prints JSON and masks SECRET values.';
+    await writeFile(join(root, 'src/flask/cli.py'), code.join('\n'));
+    await writeFile(join(root, 'tests/test_cli.py'), tests.join('\n'));
+    await writeFile(join(root, 'docs/cli.rst'), docs.join('\n'));
+
+    const repository = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
+    const reports: ContextReport[] = [];
+    const context = new ContextEngine(repository, 8000, (report) => reports.push(report), true);
+    const result = await context.bundle('Add the flask config command, test JSON masking, and document it in CLI', signal);
+    const serialized = JSON.stringify(result.items);
+    assert.match(serialized, /Existing registration or entry point/);
+    assert.match(serialized, /Existing handler definition/);
+    assert.match(serialized, /def config_command/);
+    assert.match(serialized, /Existing test definition/);
+    assert.match(serialized, /Existing documentation section/);
+    assert.ok(reports.at(-1)?.hits.some((hit) => hit.path === 'src/flask/cli.py'));
+    assert.ok(reports.at(-1)?.hits.some((hit) => hit.path === 'tests/test_cli.py'));
+    assert.ok(reports.at(-1)?.hits.some((hit) => hit.path === 'docs/cli.rst'));
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});

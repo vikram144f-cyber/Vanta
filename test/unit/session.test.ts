@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { OverviewBridge } from '../../src/mcp';
 import { parseStudioAction } from '../../src/protocol';
 import { StudioSession } from '../../src/session';
-import { localServerUrl, overviewToolName } from '../../src/trueforge';
+import { localServerUrl, modelFailure, overviewToolName } from '../../src/trueforge';
 import type { ApprovalEvent, Event, Forge } from '../../src/trueforge';
 import type { QuickTools } from '../../src/mcp';
 import type { QuickEditTarget } from '../../src/session';
@@ -20,6 +20,17 @@ const source: Event = {
     toolInfo: { type: 'mcp', name: overviewToolName, serverName: 'connector', serverId: 'connector' } }],
 };
 const pending: Event = { type: 'tool.approval_required', id: 'pending', createdAt, threadId: 'main', toolCalls: [{ id: 'tool', sourceEventId: 'source' }] };
+
+test('provider limit classification preserves retry guidance and omits raw details', () => {
+  assert.equal(modelFailure('429 GenerateRequestsPerDayPerProjectPerModel Please retry in 20s').limit, 'daily');
+  assert.equal(modelFailure('429 GenerateRequestsPerDayPerProjectPerModel Please retry in 20s').retrySeconds, undefined);
+  assert.equal(modelFailure('429 GenerateContentRequestsPerMinutePerProjectPerRegion Please retry in 5.2s').limit, 'rpm');
+  assert.equal(modelFailure('429 GenerateContentRequestsPerMinutePerProjectPerRegion Please retry in 5.2s').retrySeconds, 6);
+  assert.equal(modelFailure('RESOURCE_EXHAUSTED GenerateContentInputTokenCountPerMinute quota').limit, 'tpm');
+  assert.equal(modelFailure('503 overload').limit, 'overload');
+  assert.match(modelFailure('iteration limit of 32, please request again').detail, /tool iteration limit/);
+  assert.doesNotMatch(modelFailure('429 nonsense synthetic-private-data').detail, /synthetic-private-data/);
+});
 
 function setup(overrides: Partial<Forge> = {}, edit?: (tools: QuickTools) => void) {
   const calls: string[] = [];

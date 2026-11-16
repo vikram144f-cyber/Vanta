@@ -25,6 +25,8 @@ export function baseSelection(document: vscode.TextDocument, selections: readonl
 export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Disposable {
   readonly #values = new Map<string, { before: string; after: string }>();
   #inputOpen = false;
+  #undo?: () => Promise<void>;
+  #undoing = false;
 
   constructor(private readonly session: StudioSession, private readonly contextBudget: () => number) {}
 
@@ -59,7 +61,7 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
     }
   }
 
-  async #target(editor: vscode.TextEditor): Promise<QuickEditTarget> {
+  async capture(editor: vscode.TextEditor): Promise<QuickEditTarget> {
     const document = editor.document;
     const selections = editor.selections;
     const base = baseSelection(document, selections, '');
@@ -122,11 +124,37 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
           throw new VantaError('VS Code rejected the edit. Reopen the source and try again.');
         }
         if (document.getText() !== expected) throw new VantaError('The buffer changed during apply. Inspect it in the editor and use Undo if needed.');
+        const version = document.version;
+        this.#undo = async () => {
+          const editor = await vscode.window.showTextDocument(document, { preview: false });
+          const timeout = AbortSignal.timeout(4500);
+          const actualDisk = await disk.diskText(path, timeout);
+          if (!scope.isAvailable() || document.isClosed || document.version !== version || document.getText() !== expected
+            || (actualDisk !== originalDisk && actualDisk !== expected)) {
+            throw new VantaError('Quick Edit cannot be undone because the source changed. Review the buffer in VS Code.');
+          }
+          if (!await editor.edit((edit) => {
+            edit.replace(new vscode.Range(new vscode.Position(0, 0), document.positionAt(expected.length)), base.text);
+          }, { undoStopBefore: true, undoStopAfter: true })) throw new VantaError('VS Code rejected Quick Edit undo.');
+        };
       } };
   }
 
+  async undo() {
+    if (!this.#undo || this.#inputOpen || this.#undoing || isBusy(this.session.state.phase)) {
+      void vscode.window.showInformationMessage('No completed Quick Edit is available to undo right now.');
+      return;
+    }
+    this.#undoing = true;
+    try {
+      await this.#undo();
+      this.#undo = undefined;
+    } catch (error) { void vscode.window.showWarningMessage(safeError(error)); }
+    finally { this.#undoing = false; }
+  }
+
   async run() {
-    if (this.#inputOpen || isBusy(this.session.state.phase)) {
+    if (this.#inputOpen || this.#undoing || isBusy(this.session.state.phase)) {
       void vscode.window.showInformationMessage('Finish or stop the current VANTA request before starting another Quick Edit.');
       return;
     }
@@ -137,7 +165,7 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
     }
     this.#inputOpen = true;
     try {
-      const target = await this.#target(editor);
+      const target = await this.capture(editor);
       const instruction = await vscode.window.showInputBox({ title: `VANTA Quick Edit · ${basename(target.base.path)}`,
         prompt: 'Describe the edit. VANTA can share the selection and bounded workspace context with your TrueForge model.',
         placeHolder: 'What should change?', validateInput: (value) => !value.trim() ? 'Enter an instruction.' : value.length > 4000 ? 'Use at most 4,000 characters.' : undefined });
@@ -157,7 +185,7 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
     finally { this.#inputOpen = false; }
   }
 
-  dispose() { this.#values.clear(); }
+  dispose() { this.#values.clear(); this.#undo = undefined; }
 }
 
 export const quickEditScheme = scheme;

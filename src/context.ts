@@ -263,12 +263,57 @@ export class ContextEngine {
     // Give distinct implementation, test and docs evidence a chance before similar secondary matches.
     const group = (path: string) => /(^|\/)tests?\//i.test(path) ? 'test' : /(^|\/)docs?\//i.test(path) ? 'docs' : 'code';
     const representatives = ['code', 'test', 'docs'].map((kind) => ranked.find((hit) => group(hit.path) === kind)).filter((hit) => !!hit);
+    if (this.agentMode) {
+      const extra: Candidate[] = [];
+      for (const hit of representatives) {
+        const kind = group(hit.path);
+        const nearby = (index: number, reason: string, lines = 13) => {
+          if (index < 0) return;
+          const start = Math.max(1, index - 2);
+          const end = Math.min(hit.file.lines.length, start + lines - 1);
+          if (start >= hit.start && end <= hit.end) return;
+          extra.push({ ...hit, start, end, reason, symbol: undefined });
+        };
+        if (kind === 'code') {
+          const registration = hit.file.lines.findIndex((line) => /\.(?:add|register|include|mount)(?:_[a-z]+)?\s*\(/i.test(line));
+          nearby(registration, 'Existing registration or entry point');
+          const names = registration < 0 ? [] : hit.file.lines.slice(registration, registration + 8).flatMap((line) => {
+            const match = /\.(?:add|register|include|mount)(?:_[a-z]+)?\s*\(\s*([\w$]+)\s*[,)]/i.exec(line);
+            return match?.[1] ? [match[1]] : [];
+          });
+          const handlers = hit.file.lines.flatMap((line, index) =>
+            /^(?:@[\w.]+(?:command|route|handler)|export\s+(?:default\s+)?(?:function|class))/i.test(line) ? [index] : []);
+          const definitions = names.length ? declarations(hit.file, hit.path) : [];
+          const registered = names.reverse().map((name) => definitions.find((definition) => definition.name === name)).find(Boolean);
+          let handler = -1;
+          if (registered) {
+            handler = handlers.filter((index) => index < registered.start - 1 && index >= registered.start - 20).at(-1) ?? registered.start - 1;
+          } else if (registration >= 0 && handlers.length) {
+            handler = handlers.reduce((nearest, index) => Math.abs(index - registration) < Math.abs(nearest - registration) ? index : nearest, handlers[0]!);
+          } else {
+            handler = handlers.find((index) => index + 1 >= hit.start) ?? handlers.at(-1) ?? -1;
+          }
+          nearby(handler, 'Existing handler definition', 22);
+        } else if (kind === 'test') {
+          const test = hit.file.lines.findIndex((line) => /^(?:async\s+)?def test_|^(?:test|it|describe)\s*\(/.test(line));
+          nearby(test, 'Existing test definition');
+        } else {
+          const headings = hit.file.lines.flatMap((line, index) => index > 2 && (
+            /^#{2,4}\s+/.test(line) || (/^[-~=^]{3,}\s*$/.test(line) && !!hit.file.lines[index - 1]?.trim())
+          ) ? [index] : []);
+          nearby(headings.filter((index) => index + 1 < hit.start).at(-1) ?? -1, 'Existing documentation section');
+          const next = headings.find((index) => index + 1 >= hit.start);
+          nearby(next ?? -1, 'Existing documentation section');
+        }
+      }
+      ranked.unshift(...extra);
+    }
     const fresh = [...new Set([...representatives, ...ranked])].filter((hit) => !(this.#seen.get(hit.path) ?? [])
       .some((sent) => sent.start <= hit.end && sent.end >= hit.start));
     const top = fresh.slice(0, 12);
     const hits: ContextHit[] = top.map(({ path, start, end, reason, symbol, selected }) => ({ path, start, end, reason, symbol, selected }));
     const payload = top.map((hit) => ({ ...snippet(hit.path, hit.file, hit.start, hit.end), reason: hit.reason, symbol: hit.symbol }));
-    const output = this.#emit('Context bundle', hits, payload, Math.floor(this.budget * (this.agentMode ? 0.24 : 0.6)), limited || fresh.length > top.length, backend);
+    const output = this.#emit('Context bundle', hits, payload, Math.floor(this.budget * (this.agentMode ? 0.46 : 0.6)), limited || fresh.length > top.length, backend);
     for (const hit of hits.filter((item) => item.selected)) this.#seen.set(hit.path, [...(this.#seen.get(hit.path) ?? []), hit]);
     return output;
   }

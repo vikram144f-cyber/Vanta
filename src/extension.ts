@@ -135,6 +135,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.registerWebviewViewProvider('vanta.studio', new StudioView(context.extensionUri, studio)),
     vscode.commands.registerCommand('vanta.openStudio', () => vscode.commands.executeCommand('vanta.studio.focus')),
     vscode.commands.registerCommand('vanta.quickEdit', () => quickEdit.run()),
+    vscode.commands.registerCommand('vanta.undoQuickEdit', () => quickEdit.undo()),
     vscode.commands.registerCommand('vanta.cancelRun', () => studio.cancel()),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('vanta')) void studio.refresh();

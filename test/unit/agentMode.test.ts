@@ -47,6 +47,7 @@ test('missing and ambiguous anchors, overlapping edits, and malformed arguments 
     edits: anchors.map((old) => ({ old, replacement: 'new' })) });
   assert.throws(() => stage('two'), /ambiguous/);
   assert.throws(() => stage('missing'), /missing/);
+  assert.throws(() => stage('two two\\nend'), /Edit 1.*real line breaks/);
   assert.throws(() => stage('two two\n', '\nend'), /overlapping/);
   assert.equal(patch.files.size, 0);
   assert.equal(stageAgentSchema.safeParse({ path: file.path, summary: 'Edit', edits: [], script: 'unexpected' }).success, false);
@@ -76,7 +77,7 @@ test('batch failure compensates an earlier write and preserves a divergent buffe
 
 const python = process.env.VANTA_TEST_PYTHON;
 
-for (const verdict of ['allow', 'deferred', 'deny', 'cancel', 'forged'] as const) {
+for (const verdict of ['allow', 'deferred', 'deny review', 'deny', 'cancel', 'failed test', 'interrupted', 'forged'] as const) {
   test(`Agent Mode patch and verification gates · ${verdict}`, { skip: !python, timeout: 15_000 }, async () => {
     assert.ok(python);
     const path = 'test_fixture.py';
@@ -107,19 +108,20 @@ for (const verdict of ['allow', 'deferred', 'deny', 'cancel', 'forged'] as const
         start: async function* () {
           yield { type: 'turn.created', id: 'turn', turnId: 'turn', previousTurnId: null, createdAt, threadId: null, state: { status: 'running' } };
           const { proposalId, revision } = await tools.stage({ path, summary: 'Add an assertion',
-            edits: [{ old: '    assert True', replacement: '    assert 1 == 1' }] }) as typeof reference;
+            edits: [{ old: '    assert True', replacement: verdict === 'failed test' ? '    assert False' : '    assert 1 == 1' }] }) as typeof reference;
           reference = { proposalId, revision };
           yield* pause('review_changes', reference);
         },
         resume: async function* () {
           yield { ...last, id: last.toolCallId + '-allow', createdAt };
-          if (last.toolCallId === 'review_changes') {
+          if (last.toolCallId === 'review_changes' && last.approval.status === 'allow') {
             yield response('review_changes', tools.review(reference));
             yield* pause('run_verification', { target: path });
             return;
           }
           if (last.approval.status === 'allow') yield response('run_verification',
             verdict === 'forged' ? { status: 'passed', exitCode: 0 } : await tools.verify(path));
+          if (verdict === 'interrupted') return;
           yield { type: 'turn.done', id: 'done', createdAt, threadId: null,
             state: { status: 'done', completedAt: createdAt, output: null, requiredActions: [] } };
         },
@@ -157,6 +159,14 @@ for (const verdict of ['allow', 'deferred', 'deny', 'cancel', 'forged'] as const
       assert.throws(() => tools.review(reference), /local patch approval/);
       await session.decide('review_changes', true);
       assert.deepEqual(approved, []);
+      if (verdict === 'deny review') {
+        await session.finishReview(shown.id, false);
+        await run;
+        assert.deepEqual(approved, ['deny']);
+        assert.equal(writes, 0);
+        assert.equal(await readFile(join(root, path), 'utf8'), source);
+        return;
+      }
       await session.reviewHunk(shown.id, shown.hunks[0]!.id, 'accepted');
       await session.finishReview(shown.id, true);
       const command = await verification;
@@ -170,7 +180,8 @@ for (const verdict of ['allow', 'deferred', 'deny', 'cancel', 'forged'] as const
       if (verdict === 'allow' || verdict === 'deferred') assert.equal(session.state.verification?.status, 'passed');
       if (verdict === 'deny') assert.equal(session.state.verification?.status, 'denied');
       if (verdict === 'cancel') assert.equal(session.state.phase, 'cancelled');
-      if (verdict === 'forged') assert.equal(session.state.phase, 'failed');
+      if (verdict === 'failed test') assert.equal(session.state.verification?.exitCode, 1);
+      if (verdict === 'forged' || verdict === 'failed test' || verdict === 'interrupted') assert.equal(session.state.phase, 'failed');
       assert.equal(await readFile(join(root, path), 'utf8'), source);
     } finally { await session.dispose(); await rm(root, { recursive: true, force: true }); }
   });

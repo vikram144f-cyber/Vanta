@@ -60,6 +60,10 @@
         "title": "VANTA: Quick Edit"
       },
       {
+        "command": "vanta.undoQuickEdit",
+        "title": "VANTA: Undo Last Quick Edit"
+      },
+      {
         "command": "vanta.cancelRun",
         "title": "VANTA: Cancel Current Run"
       }

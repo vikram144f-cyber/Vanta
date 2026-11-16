@@ -35,12 +35,16 @@ export class AgentPatch {
     if (this.#closed || this.#grant || this.files.size >= 12 || this.files.has(proposal.path)) {
       throw new VantaError('This proposal is sealed or the file was already staged. Stage all edits for a file in one call.');
     }
-    const edits = proposal.edits.map(({ old, replacement }) => {
+    const edits = proposal.edits.map(({ old, replacement }, index) => {
       const text = old.replace(/\r\n?|\n/g, base.eol);
       const start = base.text.indexOf(text);
-      if (start < 0 || base.text.indexOf(text, start + 1) >= 0) {
-        throw new VantaError('An exact anchor is missing or ambiguous. Read the file and include unique surrounding text.');
+      if (start < 0) {
+        const guidance = /\\[nr"]/.test(old)
+          ? ' Use source text in the string value. Preserve real line breaks and quotes when copying from a JSON excerpt.'
+          : ' Copy a short verbatim anchor from the source, including its indentation.';
+        throw new VantaError(`Edit ${index + 1} is missing an exact anchor.${guidance}`);
       }
+      if (base.text.indexOf(text, start + 1) >= 0) throw new VantaError(`Edit ${index + 1} has an ambiguous anchor. Include unique surrounding text.`);
       return { start, end: start + text.length, replacement: replacement.replace(/\r\n?|\n/g, base.eol) };
     }).sort((a, b) => a.start - b.start);
     const after = applyHunks(base, edits);

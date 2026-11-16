@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type { AgentTools, OverviewBridge, QuickTools } from './mcp';
 import { isBusy } from './protocol';
 import type { StudioState } from './protocol';
-import { agentModeDefinition, inlineAgent, LoopbackConnectorBlocked, overviewToolName, safeError, VantaError } from './trueforge';
+import { agentModeDefinition, inlineAgent, LoopbackConnectorBlocked, modelFailure, overviewToolName, safeError, VantaError } from './trueforge';
 import type { Event, Forge } from './trueforge';
 import { ContextEngine, defaultBudget, estimateContext, parseMentions } from './context';
 import type { ContextReport } from './context';
@@ -532,12 +532,7 @@ export class StudioSession {
       case 'turn.done':
         run.terminal = event.state.status === 'done' ? 'completed' : event.state.status === 'cancelled' ? 'cancelled' : 'failed';
         run.approval = undefined;
-        this.#set({ approval: undefined, error: event.state.status === 'error'
-          ? (/\b429\b|quota|rate.limit|RESOURCE_EXHAUSTED/i.test(event.state.message)
-            ? 'The configured model reached a rate or quota limit. Wait and try again, or choose another configured model.'
-            : /\b503\b|high demand/i.test(event.state.message)
-              ? 'The configured model is temporarily unavailable. Try again or choose another configured model.'
-            : 'The TrueForge agent reported a failure. Check the session and model configuration in TrueForge.') : undefined });
+        this.#set({ approval: undefined, error: event.state.status === 'error' ? modelFailure(event.state.message).detail : undefined });
         break;
     }
   }

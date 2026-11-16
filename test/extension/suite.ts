@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 import { writeFile, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { baseSelection } from '../../src/quickEdit';
+import { baseSelection, QuickEdit } from '../../src/quickEdit';
 import { applyHunks, createHunks } from '../../src/quickPatch';
+import { fingerprint } from '../../src/quickPatch';
+import type { StudioSession } from '../../src/session';
 import { editorAgent } from '../../src/editorAgent';
 
 export async function run() {
@@ -12,7 +14,7 @@ export async function run() {
   await extension.activate();
   assert.ok(extension.isActive);
   const commands = await vscode.commands.getCommands();
-  for (const name of ['vanta.openStudio', 'vanta.quickEdit', 'vanta.cancelRun', 'vanta.studio.focus']) {
+  for (const name of ['vanta.openStudio', 'vanta.quickEdit', 'vanta.undoQuickEdit', 'vanta.cancelRun', 'vanta.studio.focus']) {
     assert.ok(commands.includes(name), name);
   }
   await vscode.commands.executeCommand('vanta.openStudio');
@@ -45,6 +47,36 @@ export async function run() {
   assert.equal(buffer.getText(), captured.text);
   const folder = vscode.workspace.workspaceFolders?.[0];
   assert.ok(folder);
+  const quickFile = join(folder.uri.fsPath, 'quick-saved.txt');
+  const quickOriginal = 'original\r\nend\r\n';
+  const quickAfter = 'reviewed\r\nend\r\n';
+  await writeFile(quickFile, quickOriginal);
+  const quick = new QuickEdit({ state: { phase: 'idle' } } as StudioSession, () => 8000);
+  try {
+    const quickDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(quickFile));
+    const quickEditor = await vscode.window.showTextDocument(quickDoc);
+    quickEditor.selection = new vscode.Selection(0, 0, 1, 0);
+    const target = await quick.capture(quickEditor);
+    const changes = createHunks(target.base, 'reviewed\r\n');
+    await target.apply(changes, fingerprint(quickAfter), AbortSignal.timeout(5000), () => undefined);
+    assert.equal(await readFile(quickFile, 'utf8'), quickOriginal);
+    assert.equal(await quickDoc.save(), true);
+    assert.equal(await readFile(quickFile, 'utf8'), quickAfter);
+    await vscode.window.showTextDocument(buffer);
+    await quick.undo();
+    assert.equal(quickDoc.getText(), quickOriginal);
+    assert.equal(await readFile(quickFile, 'utf8'), quickAfter);
+    assert.equal(await quickDoc.save(), true);
+    assert.equal(await readFile(quickFile, 'utf8'), quickOriginal);
+    const nextEditor = await vscode.window.showTextDocument(quickDoc);
+    nextEditor.selection = new vscode.Selection(0, 0, 1, 0);
+    const next = await quick.capture(nextEditor);
+    await next.apply(createHunks(next.base, 'reviewed\r\n'), fingerprint(quickAfter), AbortSignal.timeout(5000), () => undefined);
+    assert.equal(await nextEditor.edit((edit) => edit.insert(new vscode.Position(1, 0), 'user edit\r\n')), true);
+    await quick.undo();
+    assert.equal(quickDoc.getText(), 'reviewed\r\nuser edit\r\nend\r\n');
+    console.log('Quick Edit targeted undo restored a saved file from a different active editor and preserved later edits.');
+  } finally { quick.dispose(); }
   const repo = await editorAgent(async () => undefined);
   assert.ok(repo, 'Expected a trusted local workspace');
   const paths = ['agent-a.txt', 'agent-b.txt', 'agent-c.txt'];
@@ -75,5 +107,5 @@ export async function run() {
   assert.equal(commits, 1);
   assert.match(target.getText(), /^user edit/);
   console.log('Agent Mode text-only WorkspaceEdit applied and undid three CRLF buffers, preserved disk, and rejected dirty and deleted targets.');
-  console.log('VANTA activated and all three extension commands executed in the Windows Extension Host.');
+  console.log('VANTA activated and its commands registered in the Windows Extension Host.');
 }
