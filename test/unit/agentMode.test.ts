@@ -8,6 +8,7 @@ import { AgentPatch, stageAgentSchema } from '../../src/agentPatch';
 import { applyBatch } from '../../src/agentWorkspace';
 import { Repository } from '../../src/repository';
 import { StudioSession } from '../../src/session';
+import { agentModeDefinition } from '../../src/trueforge';
 import type { AgentTools } from '../../src/mcp';
 import type { ApprovalEvent, Event, Forge } from '../../src/trueforge';
 import { runPytest, verificationTarget } from '../../src/verification';
@@ -16,6 +17,22 @@ import type { BaseSelection } from '../../src/quickPatch';
 const base = (path: string, text = 'old\nuntouched\nold end\n'): BaseSelection =>
   ({ path, text, start: 0, end: text.length, version: 1, eol: '\n' });
 const binding = { call: 'call', turn: 'turn', session: 'session', workspace: 'workspace' };
+
+test('Agent Mode exposes its first context call and preserves deferred tools and approvals', () => {
+  const definition = agentModeDefinition('test/model', 'test-mcp', {
+    stage: 'stage_file_edit', review: 'review_changes', verify: 'run_verification',
+  });
+  assert.ok('spec' in definition);
+  const { spec } = definition;
+  const [connector] = spec.mcpServers ?? [];
+  assert.match(spec.instructions ?? '', /calling preloaded get_context_bundle once/);
+  assert.ok(connector?.preloadTools);
+  assert.equal(connector?.preload, false);
+  assert.ok(connector.preloadTools.includes('get_context_bundle'));
+  assert.ok(connector.enableTools?.includes('find_symbol'));
+  assert.ok(!connector.preloadTools.includes('find_symbol'));
+  assert.deepEqual(connector.requireApprovalForTools, ['review_changes', 'run_verification']);
+});
 
 test('multi-file receipt seals the exact selected hunks and revision once', () => {
   const patch = new AgentPatch();
