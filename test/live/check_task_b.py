@@ -1,4 +1,4 @@
-"""Check the explicitly saved Task B result from the pinned Flask checkout."""
+"""Check Task B from a staged snapshot or the explicitly saved checkout."""
 
 import json
 import pathlib
@@ -15,6 +15,10 @@ def main():
     assert imported.is_relative_to(root / "src"), imported
     public = {"DEMO_PUBLIC": "visible", "DEMO_VERBOSE": True, "DEMO_NUMBER": 42}
     secret = {
+        "DEMO_SECRET": "synthetic-e",
+        "DEMO_PASSWORD": "synthetic-f",
+        "DEMO_TOKEN": "synthetic-g",
+        "DEMO_KEY": "synthetic-h",
         "mySeCrEt": "synthetic-a",
         "DemoPassword": "synthetic-b",
         "demo_token_suffix": "synthetic-c",
