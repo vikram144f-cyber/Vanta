@@ -9,7 +9,7 @@ import { VantaError } from './trueforge';
 
 // The base Python process owns the Windows Job. The cancellation marker reaches
 // it even when the configured venv interpreter starts a Windows redirector.
-const bootstrap = String.raw`
+const processBootstrap = String.raw`
 import os, sys, threading, time
 if os.name == 'nt':
     import ctypes as c
@@ -35,11 +35,26 @@ def cancel_when_requested(path):
         time.sleep(0.05)
     os._exit(124)
 threading.Thread(target=cancel_when_requested, args=(sys.argv[1],), daemon=True).start()
+`;
+
+const pytestBootstrap = processBootstrap + String.raw`
 import pytest
 sys.argv = ['pytest', *sys.argv[2:]]
 root = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(root, 'src'), root]
 sys.exit(pytest.console_main())
+`;
+
+const syntaxBootstrap = processBootstrap + String.raw`
+from pathlib import Path
+failed = False
+for name in sys.argv[2:]:
+    try:
+        compile(Path(name).read_bytes(), name, 'exec')
+    except SyntaxError as error:
+        print(f'{name}:{error.lineno or 1}:{error.offset or 1}: {type(error).__name__}: {error.msg}')
+        failed = True
+sys.exit(int(failed))
 `;
 
 export interface VerificationResult {
@@ -64,6 +79,24 @@ export async function verificationPython(path: string) {
 
 export function pytestCommand(target: string) { return `python -m pytest ${target} -q`; }
 
+export async function checkPythonSyntax(python: string, files: readonly { path: string; text: string }[], signal: AbortSignal) {
+  const sources = files.filter(({ path }) => /\.py[wi]?$/i.test(path));
+  if (!sources.length) return;
+  const snapshot = await mkdtemp(join(tmpdir(), 'vanta-syntax-'));
+  try {
+    for (const { path, text } of sources) {
+      signal.throwIfAborted();
+      if (!safeRelativePath(path)) throw new VantaError('Invalid staged Python path.');
+      const dest = join(snapshot, ...path.split('/'));
+      await mkdir(dirname(dest), { recursive: true });
+      await writeFile(dest, text, { flag: 'wx' });
+    }
+    const script = join(snapshot, '.vanta-syntax-check.py');
+    await writeFile(script, syntaxBootstrap, { flag: 'wx' });
+    return await execute(python, script, snapshot, sources.map(({ path }) => path), 'Python syntax check', signal, 10_000, ['-S']);
+  } finally { await rm(snapshot, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }); }
+}
+
 export async function runPytest(repo: Repository, python: string, target: string, files: readonly ApprovedFile[], signal: AbortSignal, timeout = 45_000): Promise<VerificationResult> {
   if (!verificationTarget(target)) throw new VantaError('Choose an existing relative Python test file.');
   await repo.location(target, signal);
@@ -84,19 +117,20 @@ export async function runPytest(repo: Repository, python: string, target: string
     // The Windows venv launcher forwards a command line to its base Python.
     // Keep the bootstrap out of that command line so quote handling is identical.
     const script = join(snapshot, '.vanta-pytest.py');
-    await writeFile(script, bootstrap, { flag: 'wx' });
-    return await execute(python, script, snapshot, target, signal, timeout);
+    await writeFile(script, pytestBootstrap, { flag: 'wx' });
+    return await execute(python, script, snapshot, [target, '-q'], pytestCommand(target), signal, timeout);
   } finally { await rm(snapshot, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }); }
 }
 
-function execute(python: string, script: string, cwd: string, target: string, signal: AbortSignal, timeout: number): Promise<VerificationResult> {
+function execute(python: string, script: string, cwd: string, args: string[], command: string, signal: AbortSignal, timeout: number,
+  pythonOptions: string[] = []): Promise<VerificationResult> {
   signal.throwIfAborted();
   const windows = process.platform === 'win32';
   const env: NodeJS.ProcessEnv = { TEMP: cwd, TMP: cwd, TMPDIR: cwd, PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1' };
   if (windows) env.SystemRoot = process.env.SystemRoot;
   return new Promise((resolve, reject) => {
     const marker = join(cwd, '.vanta-cancel');
-    const child = spawn(python, ['-I', '-B', '-u', '-X', 'utf8', script, marker, target, '-q'], { cwd, env, shell: false, windowsHide: true,
+    const child = spawn(python, ['-I', '-B', '-u', '-X', 'utf8', ...pythonOptions, script, marker, ...args], { cwd, env, shell: false, windowsHide: true,
       detached: !windows, stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks: Buffer[] = [];
     let size = 0;
@@ -141,7 +175,7 @@ function execute(python: string, script: string, cwd: string, target: string, si
       const raw = Buffer.concat(chunks).toString('utf8');
       const output = raw.replaceAll(cwd, '<verification snapshot>').replaceAll(python, '<configured Python>')
         .replace(/^.*(?:authorization|api[_-]?key|access[_-]?token|client[_-]?secret|password|private key|\b(?:gh[pousr]_|sk-|AIza)[A-Za-z0-9_-]{12,}).*$/gim, '[Potential credential redacted]');
-      resolve({ command: pytestCommand(target), status: stopped ?? (exitCode === 0 ? 'passed' : 'failed'), exitCode,
+      resolve({ command, status: stopped ?? (exitCode === 0 ? 'passed' : 'failed'), exitCode,
         output: output + (size > 8192 ? '\n[Output truncated]' : '') });
     });
     if (signal.aborted) cancel();

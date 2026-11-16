@@ -11,11 +11,11 @@ import type { ContextReport } from './context';
 import type { Repository } from './repository';
 import { proposeTool, QuickPatch, reviewSchema, reviewTool } from './quickPatch';
 import type { BaseSelection, HunkEdit, ReviewReceipt } from './quickPatch';
-import { fingerprint } from './quickPatch';
+import { applyHunks, fingerprint } from './quickPatch';
 import { AgentPatch, reviewAgentSchema, reviewAgentTool, stageAgentTool, verifyAgentSchema, verifyAgentTool } from './agentPatch';
 import type { AgentReceipt, ReviewReference } from './agentPatch';
 import type { AgentWorkspace } from './agentWorkspace';
-import { pytestCommand, runPytest, verificationPython, verificationTarget } from './verification';
+import { checkPythonSyntax, pytestCommand, runPytest, verificationPython, verificationTarget } from './verification';
 
 interface Gate {
   id: string;
@@ -32,7 +32,7 @@ interface AgentRun {
   staging: number;
   denied?: boolean;
   committing?: boolean;
-  review?: Gate;
+  review?: Gate & { blocked?: string };
   receipt?: AgentReceipt;
   verification?: Gate & { target: string; grant?: string; result?: { digest: string; status: string; exitCode: number | null } };
   checking?: { promise: Promise<unknown>; stop: AbortController };
@@ -463,7 +463,8 @@ export class StudioSession {
         }
         if (next.done || signal.aborted) return;
         const event = next.value;
-        this.#map(run, event);
+        const checkingReview = this.#map(run, event);
+        if (checkingReview) await checkingReview;
         if (event.type !== 'model.message.delta') {
           run.cursor = event.id;
           run.cursorIsModel = event.type === 'model.message';
@@ -529,7 +530,7 @@ export class StudioSession {
     };
   }
 
-  #map(run: Run, event: Event) {
+  #map(run: Run, event: Event): void | Promise<void> {
     if (event.type === 'model.message' || event.type === 'model.message.delta' || event.type === 'tool.response' || event.type === 'tool.approval_required') {
       run.modelActive = true;
     }
@@ -590,12 +591,7 @@ export class StudioSession {
         if (run.agent) {
           const agent = run.agent;
           if (canAllow && source.name === reviewAgentTool && !agent.review && !agent.staging && agent.patch.matches(source.reference)) {
-            agent.review = { id: call.id };
-            this.#set({ phase: 'approval' });
-            this.#activity('Waiting for Agent Mode review', `${agent.patch.id} · revision ${agent.patch.reference.revision}`);
-            const file = agent.patch.files.values().next().value!;
-            void this.#previewAgent(run, agent, file.hunks[0]!.id);
-            break;
+            return this.#prepareAgentReview(run, agent, run.approval);
           }
           if (canAllow && source.name === verifyAgentTool && source.target && agent.review?.confirmed && !agent.verification) {
             agent.verification = { id: call.id, target: source.target };
@@ -715,7 +711,30 @@ export class StudioSession {
   #agentReview(agent: AgentRun, current: number) {
     const files = [...agent.patch.files.values()].map(({ base, summary, hunks }) => ({ path: base.path, summary,
       hunks: hunks.map(({ id, start, status }) => ({ id, line: base.text.slice(0, start).split('\n').length, status })) }));
-    this.#set({ review: { id: agent.patch.id, path: '', explanation: '', current, files, hunks: files.flatMap((file) => file.hunks) } });
+    this.#set({ review: { id: agent.patch.id, path: '', explanation: '', current, blocked: agent.review?.blocked,
+      files, hunks: files.flatMap((file) => file.hunks) } });
+  }
+
+  async #prepareAgentReview(run: Run, agent: AgentRun, approval: NonNullable<Run['approval']>) {
+    const review: NonNullable<AgentRun['review']> = { id: approval.id };
+    agent.review = review;
+    const signal = run.abort.signal;
+    try {
+      const result = await checkPythonSyntax(agent.python, [...agent.patch.files.values()].map(({ base, hunks }) => ({
+        path: base.path, text: applyHunks(base, hunks),
+      })), signal);
+      if (result && result.status !== 'passed') review.blocked = result.output.trim() || `Python syntax check ${result.status}.`;
+    } catch {
+      review.blocked = 'Could not check staged Python syntax with the configured verification interpreter.';
+    }
+    signal.throwIfAborted();
+    if (review.blocked) {
+      approval.canAllow = false;
+      this.#activity('Agent Mode review blocked', review.blocked);
+    } else this.#activity('Waiting for Agent Mode review', `${agent.patch.id} · revision ${agent.patch.reference.revision}`);
+    this.#set({ phase: 'approval' });
+    const file = agent.patch.files.values().next().value!;
+    void this.#previewAgent(run, agent, file.hunks[0]!.id);
   }
 
   async #previewAgent(run: Run, agent: AgentRun, id: number) {
@@ -738,6 +757,7 @@ export class StudioSession {
     const patch = quick?.patch;
     const agent = run?.agent;
     if (run?.approval && agent && agent.patch.id === id && this.state.review?.id === id) {
+      if (agent.review?.blocked && decision !== 'view') return;
       const item = [...agent.patch.files.values()].flatMap((file) => file.hunks).find((item) => item.id === hunk);
       if (!item) return;
       if (decision !== 'view') item.status = decision;
@@ -760,6 +780,7 @@ export class StudioSession {
     const agent = run?.agent;
     if (run && agent && approval && run.sessionId && run.turnId && approval.id === agent.review?.id
       && agent.patch.id === id && this.state.review?.id === id) {
+      if (apply && !approval.canAllow) return;
       try {
         if (apply) agent.patch.authorize({ workspace: agent.scope, session: run.sessionId, turn: run.turnId, call: approval.id });
         else agent.patch.close();
@@ -790,6 +811,7 @@ export class StudioSession {
     const review = this.state.review;
     const agent = this.#active?.agent;
     if (agent?.patch.id === id && review?.id === id) {
+      if (agent.review?.blocked) return;
       for (const file of agent.patch.files.values()) for (const hunk of file.hunks) if (hunk.status === 'pending') hunk.status = 'rejected';
       this.#agentReview(agent, review.current);
       return;

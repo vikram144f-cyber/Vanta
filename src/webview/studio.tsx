@@ -38,7 +38,7 @@ function Studio() {
   const busy = isBusy(phase);
   const canSend = !busy && connection.status === 'connected' && !!(connection.selectedModel || (!agentMode && connection.agentName))
     && (!agentMode || shareContext);
-  const status = phase === 'approval' ? 'Waiting for approval' : phase === 'cancelling' ? 'Cancelling'
+  const status = phase === 'approval' ? (review?.blocked ? 'Review blocked' : 'Waiting for approval') : phase === 'cancelling' ? 'Cancelling'
     : phase === 'streaming' ? 'Model generating' : phase === 'starting' ? 'Starting session' : '';
 
   function send() {
@@ -106,9 +106,11 @@ function Studio() {
     </section>}
 
     {review && <section className="approval quick-review" aria-label={review.files ? 'Agent Mode review' : 'Quick Edit review'}>
-      <h2>{review.files ? 'Review Agent changes' : 'Review Quick Edit'}</h2>
-      {review.files ? <p>Accepting part of a patch can break related changes.</p> : <p>{review.path} · {review.explanation}</p>}
-      <p>{review.hunks.filter((hunk) => hunk.status === 'pending').length} pending</p>
+      <h2>{review.blocked ? 'Proposal blocked by Python syntax check' : review.files ? 'Review Agent changes' : 'Review Quick Edit'}</h2>
+      {review.blocked ? <pre role="alert">{review.blocked}</pre> : <>
+        {review.files ? <p>Accepting part of a patch can break related changes.</p> : <p>{review.path} · {review.explanation}</p>}
+        <p>{review.hunks.filter((hunk) => hunk.status === 'pending').length} pending</p>
+      </>}
       <div className="button-row">
         <button type="button" disabled={review.current <= 1} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: review.current - 1, decision: 'view' })}>Previous hunk</button>
         <button type="button" disabled={review.current >= review.hunks.length} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: review.current + 1, decision: 'view' })}>Next hunk</button>
@@ -118,16 +120,16 @@ function Studio() {
       <ol className="quick-hunks">{file.hunks.map((hunk) => <li key={hunk.id}>
         <button type="button" className="subtle" aria-current={review.current === hunk.id ? 'true' : undefined}
           onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: hunk.id, decision: 'view' })}>Hunk {hunk.id} · line {hunk.line} · {hunk.status}</button>
-        <div className="button-row">
+        {!review.blocked && <div className="button-row">
           <button type="button" aria-label={`Accept hunk ${hunk.id}`} aria-pressed={hunk.status === 'accepted'} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: hunk.id, decision: 'accepted' })}>Accept</button>
           <button type="button" aria-label={`Reject hunk ${hunk.id}`} aria-pressed={hunk.status === 'rejected'} onClick={() => host.postMessage({ type: 'reviewHunk', id: review.id, hunk: hunk.id, decision: 'rejected' })}>Reject</button>
-        </div>
+        </div>}
       </li>)}</ol></div>)}
       <div className="button-row">
-        <button type="button" disabled={!review.hunks.some((hunk) => hunk.status === 'pending')}
+        {!review.blocked && <><button type="button" disabled={!review.hunks.some((hunk) => hunk.status === 'pending')}
           onClick={() => host.postMessage({ type: 'rejectRemaining', id: review.id })}>Reject remaining</button>
         <button type="button" className="primary" disabled={review.hunks.some((hunk) => hunk.status === 'pending') || !review.hunks.some((hunk) => hunk.status === 'accepted')}
-          onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: true })}>{review.files ? 'Approve selected hunks' : 'Apply accepted changes'}</button>
+          onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: true })}>{review.files ? 'Approve selected hunks' : 'Apply accepted changes'}</button></>}
         <button type="button" onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: false })}>Discard proposal</button>
       </div>
     </section>}

@@ -11,7 +11,7 @@ import { StudioSession } from '../../src/session';
 import { agentModeDefinition } from '../../src/trueforge';
 import type { AgentTools } from '../../src/mcp';
 import type { ApprovalEvent, Event, Forge } from '../../src/trueforge';
-import { runPytest, verificationTarget } from '../../src/verification';
+import { checkPythonSyntax, runPytest, verificationTarget } from '../../src/verification';
 import type { BaseSelection } from '../../src/quickPatch';
 
 const base = (path: string, text = 'old\nuntouched\nold end\n'): BaseSelection =>
@@ -94,7 +94,7 @@ test('batch failure compensates an earlier write and preserves a divergent buffe
 
 const python = process.env.VANTA_TEST_PYTHON;
 
-for (const verdict of ['allow', 'deferred', 'deny review', 'deny', 'cancel', 'failed test', 'interrupted', 'forged'] as const) {
+for (const verdict of ['allow', 'deferred', 'deny review', 'invalid syntax', 'deny', 'cancel', 'failed test', 'interrupted', 'forged'] as const) {
   test(`Agent Mode patch and verification gates · ${verdict}`, { skip: !python, timeout: 15_000 }, async () => {
     assert.ok(python);
     const path = 'test_fixture.py';
@@ -130,7 +130,8 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'deny', 'cancel', 'fa
             return;
           }
           const { proposalId, revision } = await tools.stage({ path, summary: 'Add an assertion',
-            edits: [{ old: '    assert True', replacement: verdict === 'failed test' ? '    assert False' : '    assert 1 == 1' }] }) as typeof reference;
+            edits: [{ old: '    assert True', replacement: verdict === 'invalid syntax' ? 'assert True\n    return'
+              : verdict === 'failed test' ? '    assert False' : '    assert 1 == 1' }] }) as typeof reference;
           reference = { proposalId, revision };
           yield* pause('review_changes', reference);
         },
@@ -181,7 +182,17 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'deny', 'cancel', 'fa
       assert.throws(() => tools.review(reference), /local patch approval/);
       await session.decide('review_changes', true);
       assert.deepEqual(approved, []);
-      if (verdict === 'deny review') {
+      if (verdict === 'invalid syntax') {
+        assert.match(shown.blocked ?? '', /test_fixture\.py:\d+:\d+: IndentationError/);
+        const hunk = shown.hunks[0]!;
+        await session.reviewHunk(shown.id, hunk.id, 'view');
+        await session.reviewHunk(shown.id, hunk.id, 'accepted');
+        await session.finishReview(shown.id, true);
+        assert.equal(session.state.review?.hunks[0]?.status, 'pending');
+        assert.equal(approved.length, 0);
+        assert.equal(session.state.verification, undefined);
+      } else assert.equal(shown.blocked, undefined);
+      if (verdict === 'deny review' || verdict === 'invalid syntax') {
         await session.finishReview(shown.id, false);
         await run;
         assert.deepEqual(approved, ['deny']);
@@ -265,4 +276,15 @@ test('pytest verifies the overlay, bounds output, and stops the Windows process 
     await rm(join(root, 'calc.py'));
     await assert.rejects(runPytest(repo, python, target, files, new AbortController().signal), /missing/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('pre-review Python syntax check compiles staged source without importing or executing it', { skip: !python }, async () => {
+  assert.ok(python);
+  const signal = AbortSignal.timeout(5000);
+  const result = await checkPythonSyntax(python, [
+    { path: 'source/app.py', text: 'raise RuntimeError("would fail if executed")\n' },
+    { path: 'docs/readme.txt', text: 'Not Python (' },
+  ], signal);
+  assert.equal(result?.exitCode, 0);
+  assert.equal(result?.output, '');
 });

@@ -192,7 +192,9 @@ for (const cancel of [false, true]) {
     const run = session.submit('test');
     await streaming;
     if (cancel) await session.cancel();
-    await run;
+    // AbortSignal.timeout is unref'ed. Keep this isolated test alive until it fires.
+    const keepAlive = setInterval(() => undefined, 2000);
+    try { await run; } finally { clearInterval(keepAlive); }
     assert.equal(session.state.phase, cancel ? 'cancelled' : 'failed');
     if (!cancel) assert.match(session.state.error ?? '', /timed out/);
     assert.ok(transport?.aborted);

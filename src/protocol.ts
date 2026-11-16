@@ -46,7 +46,7 @@ export interface StudioState {
   agentMode?: boolean;
   changes?: { paths: string[]; status: 'applied' | 'undone' };
   verification?: { command: string; status: 'awaiting approval' | 'running' | 'passed' | 'failed' | 'timed out' | 'cancelled' | 'denied'; exitCode?: number | null; output?: string };
-  review?: { id: string; path: string; explanation: string; current: number;
+  review?: { id: string; path: string; explanation: string; current: number; blocked?: string;
     hunks: HunkSummary[]; files?: { path: string; summary: string; hunks: HunkSummary[] }[] };
 }
 
