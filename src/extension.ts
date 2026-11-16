@@ -125,7 +125,8 @@ export function activate(context: vscode.ExtensionContext) {
     bridge: async (signal, name, context, quick, agent) => {
       const scope = workspaceScope();
       if (!scope) return;
-      return startOverviewBridge(scope, signal, name, context, quick, agent);
+      const delay = vscode.workspace.getConfiguration('vanta').get('agentToolReplyDelayMs', 0);
+      return startOverviewBridge(scope, signal, name, context, quick, agent, Math.max(0, Math.min(20_000, delay)));
     },
   });
   session = studio;

@@ -57,6 +57,59 @@ for name in sys.argv[2:]:
 sys.exit(int(failed))
 `;
 
+const boundaryBootstrap = processBootstrap + String.raw`
+import ast, json
+from pathlib import Path
+
+functions = (ast.FunctionDef, ast.AsyncFunctionDef)
+def first_line(node):
+    return min((item.lineno for item in getattr(node, 'decorator_list', [])), default=node.lineno)
+
+result = {}
+for source, excerpts in json.loads(Path('sources.json').read_text(encoding='utf-8')):
+    try:
+        body = ast.parse(source).body
+    except (SyntaxError, ValueError, RecursionError):
+        continue
+    definitions = [(node, index, first_line(node)) for index, statement in enumerate(body)
+                   for node in ast.walk(statement) if isinstance(node, functions)]
+    for key, start, end in excerpts:
+        overlapping = [(node, index, first) for node, index, first in definitions
+                       if first <= end and node.end_lineno >= start]
+        if not overlapping:
+            continue
+        node, index, first = max(overlapping, key=lambda item: (item[0].end_lineno > end, item[2]))
+        boundary = dict(start=first, end=node.end_lineno)
+        if index + 1 < len(body):
+            following = body[index + 1]
+            boundary['nextStart'] = first_line(following)
+            boundary['nextDeclaration'] = following.lineno
+        result[key] = boundary
+print(json.dumps(result))
+`;
+
+export interface PythonBoundary {
+  start: number;
+  end: number;
+  nextStart?: number;
+  nextDeclaration?: number;
+}
+
+// Parse the same redacted source that is eligible for context. Source code is never imported or run.
+export async function pythonBoundaries(python: string, sources: readonly [string, readonly [number, number, number][]][],
+  signal: AbortSignal): Promise<Record<number, PythonBoundary>> {
+  if (!sources.length) return {};
+  const snapshot = await mkdtemp(join(tmpdir(), 'vanta-python-context-'));
+  try {
+    const script = join(snapshot, 'boundaries.py');
+    await writeFile(script, boundaryBootstrap, { flag: 'wx' });
+    await writeFile(join(snapshot, 'sources.json'), JSON.stringify(sources), { flag: 'wx' });
+    const result = await execute(python, script, snapshot, [], 'Python function boundaries', signal, 2_500, ['-S']);
+    signal.throwIfAborted();
+    return result.status === 'passed' ? JSON.parse(result.output) as Record<number, PythonBoundary> : {};
+  } finally { await rm(snapshot, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }); }
+}
+
 export interface VerificationResult {
   command: string;
   exitCode: number | null;

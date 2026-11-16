@@ -1,6 +1,8 @@
 import { Buffer } from 'node:buffer';
 import { VantaError } from './trueforge';
 import type { Location, Repository, SourceFile, SymbolLocation } from './repository';
+import { pythonBoundaries } from './verification';
+import type { PythonBoundary } from './verification';
 
 export const contextTools = ['list_workspace_files', 'search_workspace', 'read_file', 'find_symbol', 'get_context_bundle'] as const;
 const stopWords = new Set('about add and are built code could definition does explain file files find for from function get have how into likely me modify need new of parts probably related repository responsible should show tell that the their them this use want what where which with would'.split(' '));
@@ -23,7 +25,13 @@ export interface ContextReport {
   backend?: string;
 }
 
-export interface Snippet extends Location { text: string; source: SourceFile['source'] }
+type SourceBlock = Pick<Location, 'start' | 'end'> & { text: string };
+export interface Snippet extends Location {
+  text: string;
+  source: SourceFile['source'];
+  pythonBoundary?: PythonBoundary;
+  continuation?: SourceBlock[];
+}
 type RangeResult = Location & { requestedEnd: number; status: 'returned' | 'already_shared' | 'budget_skipped' | 'unavailable'; error?: string };
 interface Candidate extends ContextHit { score: number; file: SourceFile }
 
@@ -40,6 +48,27 @@ function snippet(path: string, file: SourceFile, start: number, end: number): Sn
   if (start > file.lines.length) throw new VantaError('Requested line is past the end of the file.');
   const slice = file.lines.slice(start - 1, Math.min(end, start + 59));
   return { path, start, end: start + slice.length - 1, text: slice.join('\n'), source: file.source };
+}
+
+function boundaryExcerpt(excerpt: Snippet, file: SourceFile, boundary: PythonBoundary, maxLines: number): Snippet {
+  const lines = new Set<number>();
+  for (let line = Math.max(excerpt.start, boundary.start, boundary.end - 2); line <= boundary.end; line++) lines.add(line);
+  if (boundary.nextStart !== undefined) lines.add(boundary.nextStart);
+  if (boundary.nextDeclaration !== undefined) lines.add(boundary.nextDeclaration);
+  for (let line = excerpt.start; line <= excerpt.end && lines.size < maxLines; line++) lines.add(line);
+  const blocks: Pick<Location, 'start' | 'end'>[] = [];
+  for (const line of [...lines].sort((a, b) => a - b)) {
+    const previous = blocks.at(-1);
+    if (previous?.end === line - 1) previous.end = line;
+    else blocks.push({ start: line, end: line });
+  }
+  const [head, ...continuation] = blocks.map(({ start, end }) => ({ start, end, text: file.lines.slice(start - 1, end).join('\n') }));
+  return { ...excerpt, ...head, pythonBoundary: boundary, ...(continuation.length ? { continuation } : {}) };
+}
+
+function hasSharedSource(excerpt: Snippet, lines: Map<number, string>) {
+  return [excerpt, ...excerpt.continuation ?? []].every(({ start, text }) =>
+    text.split('\n').every((line, index) => lines.get(start + index) === line));
 }
 
 // Charge the complete serialized payload. Bytes / 3 is a sizing heuristic, not provider usage.
@@ -80,7 +109,7 @@ export class ContextEngine {
   readonly #sharedLines = new Map<string, Map<number, string>>();
 
   constructor(readonly repository: Repository, readonly budget: number, private readonly publish: (report: ContextReport) => void,
-    private readonly agentMode = false) {}
+    private readonly agentMode = false, private readonly python?: string) {}
 
   get remainingTokens() { return Math.max(0, this.budget - this.#spent); }
 
@@ -180,12 +209,32 @@ export class ContextEngine {
     return this.#emit('Open file', [{ path, start, end: excerpt.end, reason: `Requested range · ${file.source}`, selected: false }], [excerpt], 2200);
   }
 
+  async #withPythonBoundaries<T extends Snippet>(items: readonly { excerpt: T; file: SourceFile; maxLines: number }[], signal: AbortSignal) {
+    const python = this.python;
+    if (!this.agentMode || !python) return items.map(({ excerpt }) => excerpt);
+    const sources = new Map<SourceFile, [number, number, number][]>();
+    for (const [index, { excerpt, file, maxLines }] of items.entries()) {
+      if (maxLines < 6 || !/\.py[wi]?$/i.test(excerpt.path)) continue;
+      const ranges = sources.get(file) ?? [];
+      ranges.push([index, excerpt.start, excerpt.end]);
+      sources.set(file, ranges);
+    }
+    const bounds = await pythonBoundaries(python, [...sources].map(([file, ranges]) => [file.lines.join('\n'), ranges]), signal)
+      .catch(() => { signal.throwIfAborted(); return {} as Record<number, PythonBoundary>; });
+    return items.map(({ excerpt, file, maxLines }, index) => {
+      const boundary = bounds[index];
+      return boundary ? { ...excerpt, ...boundaryExcerpt(excerpt, file, boundary, maxLines) } : excerpt;
+    });
+  }
+
   #remember(excerpts: readonly Snippet[]) {
     if (!this.agentMode) return;
-    for (const { path, start, text } of excerpts) {
-      const lines = this.#sharedLines.get(path) ?? new Map<number, string>();
-      text.split('\n').forEach((line, index) => lines.set(start + index, line));
-      this.#sharedLines.set(path, lines);
+    for (const excerpt of excerpts) {
+      const lines = this.#sharedLines.get(excerpt.path) ?? new Map<number, string>();
+      for (const { start, text } of [excerpt, ...excerpt.continuation ?? []]) {
+        text.split('\n').forEach((line, index) => lines.set(start + index, line));
+      }
+      this.#sharedLines.set(excerpt.path, lines);
     }
   }
 
@@ -199,10 +248,11 @@ export class ContextEngine {
       try {
         if (end < start) throw new VantaError('End line must be at or after the start line.');
         const file = await this.repository.read(path, signal);
-        const excerpt = snippet(path, file, start, end);
+        const original = snippet(path, file, start, end);
+        const [excerpt = original] = await this.#withPythonBoundaries([{ excerpt: original, file, maxLines }], signal);
         result.end = excerpt.end;
         const shared = this.#sharedLines.get(path);
-        if (shared && excerpt.text.split('\n').every((line, index) => shared.get(start + index) === line)) {
+        if (shared && hasSharedSource(excerpt, shared)) {
           result.status = 'already_shared';
           continue;
         }
@@ -364,8 +414,9 @@ export class ContextEngine {
     const fresh = [...new Set([...representatives, ...ranked])].filter((hit) => !(this.#seen.get(hit.path) ?? [])
       .some((sent) => sent.start <= hit.end && sent.end >= hit.start));
     const top = fresh.slice(0, this.agentMode ? 9 : 12);
-    const hits: ContextHit[] = top.map(({ path, start, end, reason, symbol, selected }) => ({ path, start, end, reason, symbol, selected }));
-    const payload = top.map((hit) => ({ ...snippet(hit.path, hit.file, hit.start, hit.end), reason: hit.reason, symbol: hit.symbol }));
+    const payload = await this.#withPythonBoundaries(top.map(({ path, file, start, end, reason, symbol }) => ({ file, maxLines: end - start + 1,
+      excerpt: { ...snippet(path, file, start, end), reason, symbol } })), signal);
+    const hits: ContextHit[] = payload.map(({ path, start, end, reason, symbol }) => ({ path, start, end, reason, symbol, selected: false }));
     const output = this.#emit('Context bundle', hits, payload, Math.floor(this.budget * (this.agentMode ? 0.46 : 0.6)), limited || fresh.length > top.length, backend);
     for (const hit of hits.filter((item) => item.selected)) this.#seen.set(hit.path, [...(this.#seen.get(hit.path) ?? []), hit]);
     this.#remember(output.items);

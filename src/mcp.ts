@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { IncomingMessage } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
@@ -49,11 +50,21 @@ function sourceEvidence<T extends { items: readonly (Snippet & { reason?: string
   const guidance = items.length
     ? 'Use the source blocks as evidence. Stage once the needed anchors are present.'
     : 'No new source was returned. Use previous evidence or report the specific missing context. Do not repeat these ranges.';
-  return [JSON.stringify(metadata), guidance, ...items.map(({ path, start, end, text, reason }) =>
-    `Source ${JSON.stringify(path)} lines ${start}-${end}${reason ? ` (${reason})` : ''}:\n${text}`)].join('\n\n');
+  return [JSON.stringify(metadata), guidance, ...items.map((item) => {
+    const { path, reason, pythonBoundary, continuation = [] } = item;
+    const boundary = pythonBoundary && `Python function ends at line ${pythonBoundary.end}.`
+      + (pythonBoundary.nextStart === undefined ? '' : ` The next top-level statement starts at line ${pythonBoundary.nextStart}.`);
+    const blocks = [item, ...continuation];
+    return [boundary, ...blocks.flatMap(({ start, end, text }, index) => {
+      const source = `Source ${JSON.stringify(path)} lines ${start}-${end}${index === 0 && reason ? ` (${reason})` : ''}:\n${text}`;
+      const previous = blocks[index - 1];
+      return previous ? [`[Lines ${previous.end + 1}-${start - 1} omitted. Source blocks are not adjacent.]`, source] : [source];
+    })].filter(Boolean).join('\n\n');
+  })].join('\n\n');
 }
 
-export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSignal, name = `vanta-run-${randomUUID()}`, context?: ContextEngine, quick?: QuickTools, agent?: AgentTools): Promise<OverviewBridge> {
+export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSignal, name = `vanta-run-${randomUUID()}`, context?: ContextEngine,
+  quick?: QuickTools, agent?: AgentTools, agentToolDelayMs = 0): Promise<OverviewBridge> {
   signal.throwIfAborted();
   const overview = await bindOverview(scope);
   signal.throwIfAborted();
@@ -65,6 +76,7 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
   let closing: Promise<void> | undefined;
   let reading = false;
   let operations = 0;
+  const paceAgentReply = () => agent && agentToolDelayMs > 0 ? delay(agentToolDelayMs, undefined, { signal }) : undefined;
   const failure = (message: string) => ({ isError: true, content: [{ type: 'text' as const, text: message }] });
   const expose = async <T extends object>(operation: (current: ContextEngine, deadline: AbortSignal) => Promise<T>, render?: (result: T & { readsRemaining: number }) => string) => {
     if (!context || closed || signal.aborted || !scope.isAvailable()) return failure('Enable workspace context for this turn in VANTA to use repository tools.');
@@ -76,6 +88,7 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
     operations++;
     try {
       const result = await operation(context, AbortSignal.any([signal, AbortSignal.timeout(7500)]));
+      await paceAgentReply();
       if (closed || signal.aborted || !scope.isAvailable()) return failure('The workspace scope ended.');
       const reply = { ...result, readsRemaining: agentReadLimit - operations };
       return { content: [{ type: 'text' as const, text: render ? render(reply) : JSON.stringify(agent ? reply : result) }] };
@@ -178,6 +191,7 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
         if (closed || signal.aborted || !scope.isAvailable()) return failure('The Agent Mode scope ended.');
         try {
           const result = await operation();
+          await paceAgentReply();
           if (closed || signal.aborted || !scope.isAvailable()) return failure('The Agent Mode scope ended.');
           return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
         } catch (error) { return failure(error instanceof VantaError ? error.message : 'Agent Mode could not complete this operation.'); }

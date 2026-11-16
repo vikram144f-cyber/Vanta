@@ -120,6 +120,14 @@
           "scope": "application",
           "description": "Estimated repository context tokens allowed per turn."
         },
+        "vanta.agentToolReplyDelayMs": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 20000,
+          "scope": "application",
+          "description": "Optional delay before VANTA Agent Mode tool replies to space out model requests. Applies only to VANTA tools and does not control provider retries or TrueForge's own tools."
+        },
         "vanta.verificationPython": {
           "type": "string",
           "default": "",

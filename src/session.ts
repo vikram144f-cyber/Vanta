@@ -294,7 +294,7 @@ export class StudioSession {
         if (repository) context = new ContextEngine(repository, budget, (report: ContextReport) => {
           for (const hit of report.hits) if (hit.selected) editing?.discovered.add(hit.path);
           if (!signal.aborted) this.#set({ context: [...(this.state.context ?? []).slice(-11), report] });
-        }, !!editing);
+        }, !!editing, editing?.python);
       }
       if (mentions.length && !context) throw new VantaError('Enable workspace context and open one trusted local folder to resolve references.');
       const attached = mentions.length && context ? await context.mentions(mentions, AbortSignal.any([signal, AbortSignal.timeout(8000)])) : [];

@@ -117,3 +117,50 @@ test('Agent Mode bundle includes nearby implementation, test, and documentation 
     assert.equal(skipped.remainingTokens, 60);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
+
+test('Agent Mode reserves source lines for actual Python boundaries across a clipped function', { skip: !process.env.VANTA_TEST_PYTHON }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vanta-context-boundaries-'));
+  const path = 'router.py';
+  const lines = [
+    'def build_routes():',
+    '    items = list_active_routes()',
+    '    if not items:',
+    '        print("No active routes")',
+    '        return',
+    '    sample = """',
+    'def misleading_declaration():',
+    '"""',
+    ...Array.from({ length: 40 }, (_, index) => `    step_${index} = items`),
+    '    return sorted(items)',
+    '',
+    '@registered(',
+    '    "next",',
+    ')',
+    'async def next_handler():',
+    '    return True',
+  ];
+  const signal = new AbortController().signal;
+  try {
+    await writeFile(join(root, path), lines.join('\n'));
+    const repository = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
+    const context = new ContextEngine(repository, 8000, () => undefined, true, process.env.VANTA_TEST_PYTHON);
+    const bundle = await context.bundle('build_routes', signal);
+    const item = bundle.items.find((hit) => hit.path === path)!;
+    assert.deepEqual(item.pythonBoundary, { start: 1, end: 49, nextStart: 51, nextDeclaration: 54 });
+    assert.ok(item.text.includes('print("No active routes")'));
+    assert.deepEqual(item.continuation?.map(({ start, end }) => [start, end]), [[47, 49], [51, 51], [54, 54]]);
+    assert.ok(item.continuation?.[0]?.text.endsWith('    return sorted(items)'));
+    assert.equal([item, ...item.continuation ?? []].reduce((count, block) => count + block.end - block.start + 1, 0), 23);
+    const clipped = { path, start: 3, end: 32 };
+    const result = await context.readRanges([clipped], 24, signal);
+    const read = result.items[0]!;
+    assert.equal(read.pythonBoundary?.end, 49);
+    assert.equal([read, ...read.continuation ?? []].reduce((count, block) => count + block.end - block.start + 1, 0), 24);
+    assert.equal((await context.readRanges([clipped], 24, signal)).ranges[0]?.status, 'already_shared');
+    lines[48] = '    return reversed(items)';
+    await writeFile(join(root, path), lines.join('\n'));
+    assert.match((await context.readRanges([clipped], 24, signal)).items[0]?.continuation?.[0]?.text ?? '', /return reversed/);
+    const limited = new ContextEngine(repository, 60, () => undefined, true, process.env.VANTA_TEST_PYTHON);
+    assert.equal((await limited.readRanges([clipped], 24, signal)).ranges[0]?.status, 'budget_skipped');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

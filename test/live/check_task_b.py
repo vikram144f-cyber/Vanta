@@ -29,7 +29,8 @@ def main():
         app.write_text(
             "from datetime import timedelta\nfrom flask import Flask\n"
             f"app = Flask(__name__)\napp.config.update({public | secret!r})\n"
-            "app.config['DEMO_DURATION'] = timedelta(seconds=75)\n",
+            "app.config['DEMO_DURATION'] = timedelta(seconds=75)\n"
+            "app.add_url_rule('/task-b-route', 'task_b_route', lambda: 'ok')\n",
             encoding="utf-8",
         )
         command = [sys.executable, "-m", "flask", "--app", str(app)]
@@ -38,6 +39,9 @@ def main():
             line.strip() for line in help_text.splitlines()
             if line.strip().split()[:1] == ["config"]
         )
+        routes = subprocess.check_output([*command, "routes"], text=True)
+        assert any(row.split() == ["task_b_route", "GET", "/task-b-route"]
+                   for row in routes.splitlines()), routes
         output = subprocess.check_output([*command, "config"], text=True)
         data = json.loads(output)
     for key, value in public.items():

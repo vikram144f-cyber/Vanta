@@ -184,3 +184,34 @@ test('Agent MCP bounds batched ranges and rejects an unapproved command', async 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('Agent MCP labels omitted Python source and can pace tool replies', { skip: !process.env.VANTA_TEST_PYTHON }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vanta-mcp-boundary-'));
+  const scope = { path: root, isAvailable: () => true };
+  const signal = new AbortController().signal;
+  const lines = ['def collect():', ...Array<string>(35).fill('    pass'), '    return True', '', 'handler = collect'];
+  const repo = await Repository.bind(scope, { ripgrep: false });
+  const context = new ContextEngine(repo, 8000, () => undefined, true, process.env.VANTA_TEST_PYTHON);
+  const blocked = () => { throw new VantaError('No local approval'); };
+  const replyDelayMs = 75;
+  const bridge = await startOverviewBridge(scope, signal, undefined, context, undefined,
+    { stage: blocked, review: blocked, verify: blocked }, replyDelayMs);
+  const client = new Client({ name: 'local-test', version: '1.0.0' });
+  try {
+    await writeFile(join(root, 'sample.py'), lines.join('\n'));
+    await client.connect(new StreamableHTTPClientTransport(new URL(bridge.url), { requestInit: { headers: { Authorization: bridge.authorization } } }));
+    const started = performance.now();
+    await client.callTool({ name: 'list_workspace_files', arguments: { query: 'sample' } });
+    assert.ok(performance.now() - started >= replyDelayMs - 5);
+    const result = await client.callTool({ name: 'read_workspace_ranges', arguments: { ranges: [{ path: 'sample.py', start: 1, end: 32 }] } });
+    const text = (result.content as { text: string }[])[0]!.text;
+    assert.match(text, /Python function ends at line 37\. The next top-level statement starts at line 39\./);
+    assert.match(text, /Lines 21-34 omitted\. Source blocks are not adjacent\./);
+    assert.match(text, /Source "sample.py" lines 35-37:\n    pass\n    pass\n    return True/);
+    assert.match(text, /Source "sample.py" lines 39-39:\nhandler = collect/);
+  } finally {
+    await client.close();
+    await bridge.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
