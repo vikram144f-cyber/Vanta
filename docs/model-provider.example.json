@@ -1,0 +1,13 @@
+{
+  "type": "google-gemini",
+  "auth": {
+    "apiKey": "REPLACE_WITH_YOUR_KEY_IN_TRUEFORGE"
+  },
+  "models": [
+    {
+      "name": "gemini-3-5-flash",
+      "modelId": "gemini-3.5-flash",
+      "properties": {}
+    }
+  ]
+}
