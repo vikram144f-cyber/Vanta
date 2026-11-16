@@ -94,6 +94,12 @@
           "scope": "application",
           "description": "Exact model name registered in TrueForge. Leave blank to choose in Agent Studio."
         },
+        "vanta.secondaryModel": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Optional second model registered in TrueForge. Tries it once in a new session after a confirmed model failure before any model output or tool activity."
+        },
         "vanta.agentName": {
           "type": "string",
           "default": "",

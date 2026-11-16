@@ -7,6 +7,7 @@ export interface Connection {
   models: string[];
   selectedModel?: string;
   agentName?: string;
+  attention?: boolean;
 }
 
 export interface Message {
@@ -36,6 +37,8 @@ export interface StudioState {
   activity: Activity[];
   phase: Phase;
   sessionId?: string;
+  activeModel?: string;
+  retry?: { prompt: string; shareContext: boolean; agentMode: boolean };
   approval?: Approval;
   error?: string;
   context?: ContextReport[];

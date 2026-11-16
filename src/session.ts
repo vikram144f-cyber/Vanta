@@ -4,8 +4,8 @@ import { randomUUID } from 'node:crypto';
 import type { AgentTools, OverviewBridge, QuickTools } from './mcp';
 import { isBusy } from './protocol';
 import type { StudioState } from './protocol';
-import { agentModeDefinition, inlineAgent, LoopbackConnectorBlocked, modelFailure, overviewToolName, safeError, VantaError } from './trueforge';
-import type { Event, Forge } from './trueforge';
+import { agentModeDefinition, inlineAgent, LoopbackConnectorBlocked, modelFailure, overviewToolName, safeError, safeTurnError, VantaError } from './trueforge';
+import type { Event, Forge, ModelFailure } from './trueforge';
 import { ContextEngine, defaultBudget, estimateContext, parseMentions } from './context';
 import type { ContextReport } from './context';
 import type { Repository } from './repository';
@@ -61,6 +61,7 @@ interface QuickRun {
 export interface Settings {
   serverUrl: string;
   model: string;
+  secondaryModel?: string;
   agentName: string;
   workspaceOverview: boolean;
   contextBudget?: number;
@@ -74,6 +75,7 @@ interface Dependencies {
   repository?(): Promise<Repository | undefined>;
   scopeKey?(): string;
   agentWorkspace?(): Promise<AgentWorkspace | undefined>;
+  streamIdleMs?: number;
 }
 
 interface Conversation { key: string; sessionId: string; connector?: string; lastTurnId?: string }
@@ -94,9 +96,31 @@ interface Run {
   cancellation?: Promise<void>;
   finished?: Promise<void>;
   terminal?: 'completed' | 'cancelled' | 'failed';
+  providerFailure?: ModelFailure;
+  modelActive?: boolean;
+  reused?: boolean;
+  cursor?: string;
+  cursorIsModel?: boolean;
+  reconnected?: boolean;
+  retired?: boolean;
+  bridgeClosed?: boolean;
   quick?: QuickRun;
   agent?: AgentRun;
   toolMessages?: Map<string, Api.ModelMessageEvent>;
+}
+
+// Bound an individual stream read even if the transport does not settle on abort.
+async function readEvent(iterator: AsyncIterator<Event>, signal: AbortSignal) {
+  signal.throwIfAborted();
+  let abort!: () => void;
+  try {
+    return await Promise.race([new Promise<never>((_, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+    }), iterator.next()]);
+  } finally {
+    signal.removeEventListener('abort', abort);
+  }
 }
 
 export class StudioSession {
@@ -111,6 +135,7 @@ export class StudioSession {
   #disposed = false;
   #nextRun = 0;
   #conversation?: Conversation;
+  #modelOverride?: { model: string; serverUrl: string; configuredModel: string };
   #undo?: () => Promise<void>;
   #undoing = false;
 
@@ -136,20 +161,25 @@ export class StudioSession {
     const check = new AbortController();
     this.#check = check;
     const settings = this.dependencies.settings();
-    const previousModel = this.state.connection.selectedModel;
     this.#set({ connection: { status: 'checking', detail: 'Checking the local TrueForge server.', models: [] } });
     try {
       const { version, models } = await this.dependencies.forge(settings.serverUrl).check(check.signal);
       if (check.signal.aborted) return;
-      const selectedModel = models.find((name) => name === settings.model)
-        ?? models.find((name) => name === previousModel)
-        ?? (models.length === 1 ? models[0] : undefined);
+      const configuredMissing = !!settings.model && !models.includes(settings.model);
+      const override = this.#modelOverride;
+      if (override && (override.serverUrl !== settings.serverUrl || override.configuredModel !== settings.model || !models.includes(override.model))) {
+        this.#modelOverride = undefined;
+      }
+      const selectedModel = this.#modelOverride?.model
+        ?? models.find((name) => name === settings.model)
+        ?? (!configuredMissing && models.length === 1 ? models[0] : undefined);
       const agentName = !settings.workspaceOverview && settings.agentName ? settings.agentName : undefined;
+      const attention = !agentName && (configuredMissing || models.length === 0);
       this.#set({ connection: {
-        status: 'connected', version, models, selectedModel, agentName,
-        detail: settings.model && !models.includes(settings.model) && !agentName
-          ? 'The configured model is unavailable. Select a model from TrueForge.'
-          : 'Local TrueForge is reachable.',
+        status: 'connected', version, models, selectedModel, agentName, attention,
+        detail: !agentName && models.length === 0 ? 'No models are configured. Add a model in TrueForge, then select Refresh.'
+          : !agentName && configuredMissing ? 'The configured model is unavailable. Select another model below the VANTA title, or configure it in TrueForge and select Refresh.'
+            : 'Local TrueForge is reachable.',
       } });
     } catch (error) {
       if (!check.signal.aborted) this.#set({ connection: { status: 'offline', detail: safeError(error), models: [] } });
@@ -160,6 +190,9 @@ export class StudioSession {
 
   selectModel(model: string) {
     if (!this.#active && this.state.connection.models.includes(model)) {
+      const { serverUrl, model: configuredModel } = this.dependencies.settings();
+      this.#modelOverride = { model, serverUrl, configuredModel };
+      if (model !== this.state.connection.selectedModel) this.#conversation = undefined;
       this.#set({ connection: { ...this.state.connection, selectedModel: model } });
     }
   }
@@ -167,13 +200,13 @@ export class StudioSession {
   clear() {
     if (this.#active) return;
     this.#conversation = undefined;
-    this.#set({ messages: [], activity: [], phase: 'idle', sessionId: undefined, error: undefined, context: [] });
+    this.#set({ messages: [], activity: [], phase: 'idle', sessionId: undefined, error: undefined, retry: undefined, context: [] });
   }
 
   async workspaceChanged() {
     this.#conversation = undefined;
     this.#undo = undefined;
-    this.#set({ context: [], changes: undefined });
+    this.#set({ context: [], changes: undefined, retry: undefined });
     await this.cancel();
   }
 
@@ -193,20 +226,51 @@ export class StudioSession {
       this.#set({ phase: 'failed', error: safeError(error) });
       return Promise.resolve();
     }
-    const run: Run = { id: ++this.#nextRun, forge, abort: new AbortController(), calls: new Map(),
-      quick: target ? { target } : undefined, toolMessages: target || agentMode ? new Map() : undefined };
+    const run = this.#newRun(forge, target, agentMode);
     this.#active = run;
     this.#set({
-      phase: 'starting', activity: [], context: [], error: undefined, review: undefined, verification: agentMode ? undefined : this.state.verification,
+      phase: 'starting', activity: [], context: [], error: undefined, review: undefined, retry: undefined,
+      quickEdit: !!target, agentMode: agentMode && !target, verification: agentMode ? undefined : this.state.verification,
       messages: [...this.state.messages.slice(-39), { id: `user-${run.id}`, role: 'user', text: prompt }],
     });
-    run.finished = this.#execute(run, prompt, settings, shareContext, connection.selectedModel, agentMode && !target);
+    run.finished = this.#runWithFallback(run, prompt, settings, shareContext, connection.selectedModel, agentMode && !target);
     return run.finished;
+  }
+
+  #newRun(forge: Forge, target: QuickEditTarget | undefined, agentMode: boolean): Run {
+    return { id: ++this.#nextRun, forge, abort: new AbortController(), calls: new Map(),
+      quick: target ? { target } : undefined, toolMessages: target || agentMode ? new Map() : undefined };
+  }
+
+  async #runWithFallback(run: Run, prompt: string, settings: Settings, shareContext: boolean, model: string | undefined, agentMode: boolean) {
+    await this.#execute(run, prompt, settings, shareContext, model, agentMode);
+    const secondary = settings.secondaryModel;
+    const failure = run.providerFailure;
+    if (secondary && secondary !== model && this.state.connection.models.includes(secondary) && model && failure && failure.kind !== 'other'
+      && !run.modelActive && !run.reused && (!run.bridge || run.bridgeClosed)
+      && (run.quick || agentMode || settings.workspaceOverview || !settings.agentName) && !run.abort.signal.aborted && !this.#disposed) {
+      const fallback = this.#newRun(run.forge, run.quick?.target, agentMode);
+      fallback.finished = run.finished;
+      this.#active = fallback;
+      run = fallback;
+      this.#activity('Primary model failed', failure.detail);
+      this.#set({ phase: 'starting', error: undefined, sessionId: undefined, context: [], activeModel: secondary });
+      this.#activity('Using configured secondary model', secondary);
+      await this.#execute(run, prompt, settings, shareContext, secondary, agentMode);
+    }
+    const phase = run.abort.signal.aborted ? 'cancelled' : run.terminal ?? 'failed';
+    this.#active = undefined;
+    this.#set({ phase, approval: undefined, review: undefined, activeModel: undefined,
+      retry: phase === 'failed' && !run.quick ? { prompt, shareContext, agentMode } : undefined });
+    const label = { completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' }[phase];
+    this.#activity(label);
   }
 
   async #execute(run: Run, prompt: string, settings: Settings, shareContext: boolean, model: string | undefined, agentMode: boolean) {
     const signal = run.abort.signal;
     const quick = run.quick;
+    const namedAgent = !quick && !agentMode && !settings.workspaceOverview ? settings.agentName : '';
+    this.#set({ activeModel: namedAgent ? undefined : model });
     try {
       const mentions = quick ? [] : parseMentions(prompt);
       const key = JSON.stringify([settings.serverUrl, model, settings.agentName, settings.workspaceOverview, this.dependencies.scopeKey?.()]);
@@ -241,12 +305,16 @@ export class StudioSession {
         try {
           run.bridge = await this.dependencies.bridge(signal, existing?.connector ?? `vanta-run-${randomUUID()}`, context, quick && {
             stage: (replacement, explanation) => {
+              signal.throwIfAborted();
+              if (run.terminal || run.retired) throw new VantaError('This Quick Edit has ended.');
+              run.modelActive = true;
               if (quick.reviewed || quick.patch) throw new VantaError('This turn already has a staged proposal. Start a new Quick Edit to replace it.');
               quick.patch = new QuickPatch(quick.target.base, explanation, replacement);
               this.#activity('Quick Edit staged', quick.patch.id);
               return quick.patch;
             },
             receipt: (id) => {
+              signal.throwIfAborted();
               if (!quick.patch) throw new VantaError('There is no staged proposal.');
               const receipt = quick.patch.consume(id);
               quick.receipt = receipt;
@@ -259,7 +327,7 @@ export class StudioSession {
         }
         if (run.bridge) {
           try {
-            await run.forge.register(run.bridge, signal);
+            await run.forge.register(run.bridge, AbortSignal.any([signal, AbortSignal.timeout(8000)]));
           } catch (error) {
             if (signal.aborted) throw error;
             if (error instanceof LoopbackConnectorBlocked) {
@@ -278,17 +346,19 @@ export class StudioSession {
       if (quick && !run.bridge) throw new VantaError('Quick Edit requires the local TrueForge MCP connector. Check the README setup.');
       if (editing && !run.bridge) throw new VantaError('Agent Mode requires the local TrueForge MCP connector. Check the README setup.');
       const agent = editing && run.bridge ? agentModeDefinition(model ?? '', run.bridge.name, { stage: stageAgentTool, review: reviewAgentTool, verify: verifyAgentTool })
-        : !quick && !settings.workspaceOverview && settings.agentName
-        ? { name: settings.agentName }
+        : namedAgent
+        ? { name: namedAgent }
         : inlineAgent(model ?? '', run.bridge?.name, quick && { propose: proposeTool, review: reviewTool });
       const reusable = existing && existing.connector === run.bridge?.name ? existing : undefined;
-      run.sessionId = reusable?.sessionId ?? await run.forge.createSession(agent, AbortSignal.timeout(8000));
+      run.reused = !!reusable;
+      run.sessionId = reusable?.sessionId ?? await run.forge.createSession(agent, AbortSignal.any([signal, AbortSignal.timeout(8000)]));
       signal.throwIfAborted();
       const conversation = reusable ?? { sessionId: run.sessionId, connector: run.bridge?.name, key };
       if (!quick && !editing) this.#conversation = conversation;
       this.#set({ sessionId: run.sessionId, quickEdit: !!quick, agentMode: !!editing });
       this.#activity(reusable ? 'Session resumed' : 'Session started');
-      await this.#consume(run, run.forge.start(run.sessionId, input, signal, conversation.lastTurnId));
+      const sessionId = run.sessionId;
+      await this.#consume(run, (streamSignal) => run.forge.start(sessionId, input, streamSignal, conversation.lastTurnId));
       if (!run.terminal && run.pauseCursor && run.turnId && run.releasePause) {
         // The initial stream can end at a pause. Subscribe from the pause event
         // after the decision, which includes responses produced before reconnect.
@@ -297,7 +367,8 @@ export class StudioSession {
           await run.decision;
           signal.throwIfAborted();
           run.pauseCursor = undefined;
-          await this.#consume(run, run.forge.resume(run.sessionId, run.turnId, cursor, signal));
+          const turnId = run.turnId;
+          await this.#consume(run, (streamSignal) => run.forge.resume(sessionId, turnId, cursor, streamSignal));
         }
       }
       if (run.terminal === 'completed' && quick) {
@@ -331,39 +402,77 @@ export class StudioSession {
         }
       }
       if (!quick && !editing && run.terminal === 'completed' && run.turnId) conversation.lastTurnId = run.turnId;
-      if (!run.terminal && !signal.aborted) throw new VantaError('The TrueForge stream ended before the turn completed. Check the session in TrueForge.');
+      if (!run.terminal && !signal.aborted) throw new VantaError('The TrueForge stream ended before the turn completed. Check the session in TrueForge before retrying.');
     } catch (error) {
       if (!signal.aborted) {
         if (run.terminal === 'completed') run.terminal = 'failed';
-        this.#set({ error: safeError(error), approval: undefined });
+        this.#set({ error: safeTurnError(error), approval: undefined, review: undefined });
       }
     } finally {
+      run.retired = true;
+      run.approval = undefined;
       quick?.patch?.revoke();
       run.agent?.patch.close();
+      if (run.terminal !== 'completed' && this.#conversation?.sessionId === run.sessionId) this.#conversation = undefined;
+      if (run.terminal !== 'completed' && !signal.aborted) run.bridge?.revoke();
       run.releasePause?.();
-      if (!run.terminal && run.sessionId) await this.#cancelRemote(run);
       run.agent?.checking?.stop.abort();
       await run.agent?.checking?.promise.catch(() => undefined);
+      if (!run.terminal && run.sessionId) await this.#cancelRemote(run);
       if (run.bridge) {
-        await run.bridge.close();
         try {
+          await run.bridge.close();
+          run.bridgeClosed = true;
           await run.forge.remove(run.bridge.name);
         } catch {
-          this.#activity('Connector cleanup incomplete', 'Its local listener is closed. You can remove the inactive VANTA connector in TrueForge.');
+          this.#activity('Connector cleanup incomplete', 'Check the connector in TrueForge.');
         }
       }
-      this.#active = undefined;
-      const phase = signal.aborted ? 'cancelled' : run.terminal ?? 'failed';
-      this.#set({ phase, approval: undefined, review: undefined });
-      const label = { completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' }[phase];
-      this.#activity(label);
     }
   }
 
-  async #consume(run: Run, stream: AsyncIterable<Event>) {
-    for await (const event of stream) {
-      if (run.abort.signal.aborted || run.terminal) break;
-      this.#map(run, event);
+  async #consume(run: Run, open: (signal: AbortSignal) => AsyncIterable<Event>) {
+    await this.#readStream(run, open);
+    const { sessionId, turnId, cursor } = run;
+    if (!run.terminal && !run.abort.signal.aborted && !run.pauseCursor && !run.reconnected && sessionId && turnId && cursor) {
+      run.reconnected = true;
+      this.#activity('Reconnecting to the existing turn');
+      await this.#readStream(run, (signal) => run.forge.resume(sessionId, turnId, cursor, signal, run.cursorIsModel));
+    }
+  }
+
+  async #readStream(run: Run, open: (signal: AbortSignal) => AsyncIterable<Event>) {
+    const transport = new AbortController();
+    const signal = AbortSignal.any([run.abort.signal, transport.signal]);
+    const iterator = open(signal)[Symbol.asyncIterator]();
+    try {
+      while (!signal.aborted && !run.terminal) {
+        const idle = AbortSignal.timeout(this.dependencies.streamIdleMs ?? 120_000);
+        let next: IteratorResult<Event>;
+        try {
+          next = await readEvent(iterator, AbortSignal.any([signal, idle]));
+        } catch (error) {
+          if (signal.aborted) return;
+          if (idle.aborted) {
+            if (run.pauseCursor) return;
+            throw new VantaError('TrueForge stopped sending updates. The run timed out. Check the model or select another one before retrying.');
+          }
+          // Only resume a known turn. Never resubmit an ambiguous POST.
+          if (run.cursor && !run.reconnected && !(error instanceof VantaError)) return;
+          throw error;
+        }
+        if (next.done || signal.aborted) return;
+        const event = next.value;
+        this.#map(run, event);
+        if (event.type !== 'model.message.delta') {
+          run.cursor = event.id;
+          run.cursorIsModel = event.type === 'model.message';
+        }
+        if (event.type === 'turn.update' && event.state.status === 'paused' && run.pauseCursor) return;
+      }
+    } finally {
+      transport.abort();
+      void iterator.return?.().catch(() => undefined);
     }
   }
 
@@ -371,6 +480,9 @@ export class StudioSession {
     const signal = run.abort.signal;
     return {
       stage: async (proposal) => {
+        signal.throwIfAborted();
+        if (run.terminal || run.retired) throw new VantaError('This Agent Mode run has ended.');
+        run.modelActive = true;
         if (agent.staging >= 12 || agent.review || !agent.discovered.has(proposal.path)) {
           throw new VantaError('Discover this file before staging it. Stage up to 12 files before review.');
         }
@@ -389,6 +501,8 @@ export class StudioSession {
       },
       review: (reference) => agent.receipt = agent.patch.consume(reference),
       verify: async (target) => {
+        signal.throwIfAborted();
+        if (run.terminal || run.retired) throw new VantaError('This Agent Mode run has ended.');
         const gate = agent.verification;
         const receipt = agent.receipt;
         if (!gate?.grant || target !== gate.target || !receipt || !agent.review?.confirmed || this.dependencies.scopeKey?.() !== agent.scope) {
@@ -416,6 +530,9 @@ export class StudioSession {
   }
 
   #map(run: Run, event: Event) {
+    if (event.type === 'model.message' || event.type === 'model.message.delta' || event.type === 'tool.response' || event.type === 'tool.approval_required') {
+      run.modelActive = true;
+    }
     switch (event.type) {
       case 'turn.created':
         run.turnId = event.turnId;
@@ -426,7 +543,9 @@ export class StudioSession {
         if (event.threadId !== 'main') break;
         const content = typeof event.content === 'string' ? event.content
           : event.content?.map((part) => part.type === 'text' ? part.text : '').join('');
-        if (content) this.#text(run, event.id, content, false);
+        if (content || this.state.messages.some((message) => message.id === `assistant-${run.id}-${event.id}`)) {
+          this.#text(run, event.id, content ?? '', false);
+        }
         run.toolMessages?.set(event.id, { ...event, content: undefined, reasoningContent: undefined });
         this.#rememberCalls(run, event.id, event.toolCalls ?? []);
         break;
@@ -531,8 +650,9 @@ export class StudioSession {
         throw new VantaError('This agent requested an interactive action that VANTA does not support. Open the session in TrueForge.');
       case 'turn.done':
         run.terminal = event.state.status === 'done' ? 'completed' : event.state.status === 'cancelled' ? 'cancelled' : 'failed';
+        run.providerFailure = event.state.status === 'error' ? modelFailure(event.state.message) : undefined;
         run.approval = undefined;
-        this.#set({ approval: undefined, error: event.state.status === 'error' ? modelFailure(event.state.message).detail : undefined });
+        this.#set({ approval: undefined, error: run.providerFailure?.detail });
         break;
     }
   }

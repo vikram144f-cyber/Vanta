@@ -175,6 +175,7 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
       const connection = this.session.state.connection;
       if (connection.status !== 'connected') throw new VantaError(connection.detail);
       if (!connection.selectedModel) {
+        if (!connection.models.length) throw new VantaError(connection.detail);
         const model = await vscode.window.showQuickPick(connection.models, { placeHolder: 'Choose the TrueForge model for Quick Edit' });
         if (!model) return;
         this.session.selectModel(model);

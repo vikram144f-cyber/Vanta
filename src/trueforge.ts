@@ -1,4 +1,4 @@
-import { TrueForge, TrueForgeError } from '@truefoundry/trueforge-sdk';
+import { TrueForge, TrueForgeError, TrueForgeTimeoutError } from '@truefoundry/trueforge-sdk';
 import type { TrueForgeApi as Api } from '@truefoundry/trueforge-sdk';
 
 export const overviewToolName = 'get_workspace_overview';
@@ -16,7 +16,7 @@ export interface Forge {
   check(signal: AbortSignal): Promise<{ version: string; models: string[] }>;
   createSession(agent: SessionAgent, signal: AbortSignal): Promise<string>;
   start(sessionId: string, prompt: string, signal: AbortSignal, previousTurnId?: string): AsyncIterable<Event>;
-  resume(sessionId: string, turnId: string, afterEventId: string, signal: AbortSignal): AsyncIterable<Event>;
+  resume(sessionId: string, turnId: string, cursor: string, signal: AbortSignal, inclusive?: boolean): AsyncIterable<Event>;
   approve(sessionId: string, turnId: string, event: ApprovalEvent, signal: AbortSignal): Promise<void>;
   cancel(sessionId: string): Promise<void>;
   register(connector: Connector, signal: AbortSignal): Promise<void>;
@@ -26,10 +26,19 @@ export interface Forge {
 export class VantaError extends Error {}
 export class LoopbackConnectorBlocked extends VantaError {}
 
-export function modelFailure(message: string): { detail: string; limit?: 'daily' | 'rpm' | 'tpm' | 'unknown' | 'overload'; retrySeconds?: number } {
+export type ModelFailure = {
+  detail: string;
+  kind: 'invalid' | 'unavailable' | 'rate-limit' | 'timeout' | 'connection' | 'auth' | 'other';
+  limit?: 'daily' | 'rpm' | 'tpm' | 'unknown' | 'overload';
+  retrySeconds?: number;
+};
+
+const chooseModel = 'Choose another configured model in Agent Studio, then retry.';
+
+export function modelFailure(message: string): ModelFailure {
   if (/\b429\b|RESOURCE_EXHAUSTED|rate.limit|quota/i.test(message)) {
     if (/per[ _-]?day|daily|\blimit:\s*0\b/i.test(message)) {
-      return { limit: 'daily', detail: 'The provider reported a daily quota or zero available capacity for this model. Check the project quota before retrying.' };
+      return { kind: 'rate-limit', limit: 'daily', detail: 'The provider reported a daily quota or zero available capacity for this model. Check the project quota or choose another configured model.' };
     }
     const limit = /input[_ ]token_count|(?:tokenCount|tokens?)PerMinute|tokens? per minute/i.test(message) ? 'tpm'
       : /requests?PerMinute|requests? per minute|generate_content_free_tier_requests[^\n]{0,200}per minute/i.test(message) ? 'rpm' : 'unknown';
@@ -37,17 +46,39 @@ export function modelFailure(message: string): { detail: string; limit?: 'daily'
     const seconds = Number(delay?.[1] ?? delay?.[2]);
     const retrySeconds = Number.isFinite(seconds) && seconds > 0 && seconds <= 3600 ? Math.ceil(seconds) : undefined;
     const scope = limit === 'rpm' ? 'requests-per-minute limit' : limit === 'tpm' ? 'tokens-per-minute limit' : 'rate or quota limit';
-    return { limit, retrySeconds, detail: `The configured model reached its ${scope}.${retrySeconds ? ` The provider advised waiting at least ${retrySeconds} seconds.` : ' Check the provider quota before retrying.'}` };
+    return { kind: 'rate-limit', limit, retrySeconds, detail: `The configured model reached its ${scope}.${retrySeconds ? ` Wait at least ${retrySeconds} seconds before retrying.` : ' Check the provider quota before retrying.'} You can also choose another configured model.` };
   }
-  if (/\b503\b|high demand|overload|(?:headers?|provider).{0,40}timeout/i.test(message)) {
-    return { limit: 'overload', detail: 'The model provider is temporarily unavailable. Try again after a short delay.' };
+  if (/\binvalid[_ -]model\b|\bunknown[_ -]model\b|\bmodel[_ -]not[_ -]found\b|\bmodel\b[^\n]{0,180}\b(?:not found|does not exist|not registered|unsupported|not supported)\b/i.test(message)) {
+    return { kind: 'invalid', detail: `TrueForge or the provider did not recognize the configured model. ${chooseModel}` };
   }
-  if (/\biteration limit\b/i.test(message)) return { detail: 'TrueForge reached the tool iteration limit. Try a narrower request.' };
-  return { detail: 'The TrueForge agent reported a failure. Check the session and model configuration in TrueForge.' };
+  if (/timed?\s*out|\btimeout\b|UND_ERR_\w*TIMEOUT|\b504\b/i.test(message)) {
+    return { kind: 'timeout', detail: `The model request timed out. ${chooseModel}` };
+  }
+  if (/\b503\b|high demand|overload|service.unavailable|\bmodel\b[^\n]{0,140}\b(?:unavailable|not available|disabled)\b/i.test(message)) {
+    return { kind: 'unavailable', limit: 'overload', detail: 'The configured model is temporarily unavailable. Retry after a short delay or choose another configured model.' };
+  }
+  if (/\b(?:401|403|UNAUTHENTICATED|PERMISSION_DENIED)\b|API.key.{0,30}invalid/i.test(message)) {
+    return { kind: 'auth', detail: 'The provider denied model access. Check the model credentials in TrueForge or choose another configured model.' };
+  }
+  if (/cannot connect|connection (?:failed|refused|reset|closed)|ECONN\w+|ENOTFOUND|EAI_AGAIN|fetch failed|network error/i.test(message)) {
+    return { kind: 'connection', detail: 'TrueForge could not reach the model provider. Check connectivity in TrueForge or choose another configured model.' };
+  }
+  if (/\biteration limit\b/i.test(message)) return { kind: 'other', detail: 'TrueForge reached the tool iteration limit. Try a narrower request.' };
+  return { kind: 'other', detail: 'The TrueForge agent reported a failure. Check the session and model configuration in TrueForge.' };
+}
+
+function responseFailure(error: TrueForgeError): ModelFailure {
+  const body = error.body as { error?: { message?: unknown; code?: unknown } } | undefined;
+  const fields = [body?.error?.code, body?.error?.message].filter((value): value is string => typeof value === 'string');
+  const failure = modelFailure(fields.join(' '));
+  return failure.kind !== 'other' ? failure : modelFailure(String(error.statusCode));
 }
 
 export function safeError(error: unknown): string {
   if (error instanceof VantaError) return error.message;
+  if (error instanceof TrueForgeTimeoutError || (error instanceof DOMException && error.name === 'TimeoutError')) {
+    return 'The TrueForge request timed out. Check the local server and retry.';
+  }
   if (error instanceof TrueForgeError) {
     switch (error.statusCode) {
       case 400: return 'TrueForge rejected the request. Check the configured model and server version.';
@@ -55,11 +86,20 @@ export function safeError(error: unknown): string {
       case 403: return 'TrueForge denied access. Check the local server and its authentication settings.';
       case 404: return 'TrueForge could not find the requested agent, session or API endpoint.';
       case 409: return 'TrueForge could not apply the request to the current turn state.';
-      case 429: return 'TrueForge rate limited the request. Wait briefly and try again.';
+      case 429: return 'TrueForge rate limited the request. Wait briefly or check the model quota before retrying.';
+      case 503: return 'The TrueForge service is temporarily unavailable. Check the local server and try again.';
       default: return 'TrueForge could not complete the request. Check the local TrueForge dashboard.';
     }
   }
   return 'Could not communicate with TrueForge. Check that the local server is running.';
+}
+
+export function safeTurnError(error: unknown): string {
+  if (error instanceof TrueForgeError) {
+    const failure = responseFailure(error);
+    if (failure.kind !== 'other' && failure.kind !== 'auth') return failure.detail;
+  }
+  return safeError(error);
 }
 
 export function localServerUrl(input: string): URL {
@@ -158,8 +198,8 @@ export class TrueForgeClient implements Forge {
     yield* stream;
   }
 
-  async *resume(sessionId: string, turnId: string, afterEventId: string, signal: AbortSignal) {
-    const stream = await this.#client.sessions.subscribeToTurn(sessionId, turnId, { afterEventId }, {
+  async *resume(sessionId: string, turnId: string, cursor: string, signal: AbortSignal, inclusive = false) {
+    const stream = await this.#client.sessions.subscribeToTurn(sessionId, turnId, inclusive ? { fromEventId: cursor } : { afterEventId: cursor }, {
       abortSignal: signal, timeoutInSeconds: 600,
     });
     yield* stream;

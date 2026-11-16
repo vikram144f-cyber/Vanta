@@ -79,9 +79,9 @@ function Studio() {
             </select></label>}
         <button className="subtle" type="button" disabled={busy} onClick={() => host.postMessage({ type: 'refreshConnection' })}>Refresh</button>
       </div>
-      <details className="connection-details" open={connection.status === 'offline' || undefined}>
+      <details className="connection-details" open={connection.status === 'offline' || connection.attention || undefined}>
         <summary>Connection details</summary>
-        <p>{connection.detail}{connection.version ? ` Version ${connection.version}.` : ''}</p>
+        <p role={connection.status === 'offline' || connection.attention ? 'alert' : undefined}>{connection.detail}{connection.version ? ` Version ${connection.version}.` : ''}</p>
       </details>
     </header>
 
@@ -93,8 +93,8 @@ function Studio() {
       {messages.map((message) => <article key={message.id} className={`message ${message.role}`}>
         <h2>{message.role === 'user' ? 'You' : 'VANTA'}</h2><p>{message.text}</p>
       </article>)}
-      {status && <p className="run-status" role="status">{status}…</p>}
-      {error && <p className="error" role="alert">{error}</p>}
+      {status && <p className="run-status" role="status">{status}{state.activeModel ? ` · ${state.activeModel}` : ''}…</p>}
+      {error && <p className="error" role="alert">{error}{phase === 'failed' && state.quickEdit ? ' Run Quick Edit again from the editor to retry.' : ''}</p>}
     </section>
 
     {approval && <section className="approval" aria-label="Tool approval">
@@ -192,6 +192,13 @@ function Studio() {
           host.postMessage({ type: 'clearConversation' });
           prompt.current?.focus();
         }}>New conversation</button>
+        {state.retry && !busy && <button type="button" className="subtle" disabled={!!draft.trim()} onClick={() => {
+          if (!state.retry) return;
+          setDraft(state.retry.prompt);
+          setShareContext(state.retry.shareContext);
+          setAgentMode(state.retry.agentMode);
+          prompt.current?.focus();
+        }}>Restore prompt</button>}
         {busy ? <button type="button" disabled={phase === 'cancelling'} onClick={() => host.postMessage({ type: 'cancelRun' })}>Stop</button>
           : <button className="primary" disabled={!canSend || !draft.trim()} type="submit">Send</button>}
       </div>

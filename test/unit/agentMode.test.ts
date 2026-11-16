@@ -89,6 +89,7 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'deny', 'cancel', 'fa
     let reference: Parameters<AgentTools['review']>[0];
     let last: ApprovalEvent;
     let writes = 0;
+    let nextFails = false;
     const approved: string[] = [];
     const createdAt = '2026-11-14T00:00:00Z';
     const pause = function* (name: string, args: unknown): Generator<Event> {
@@ -107,6 +108,10 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'deny', 'cancel', 'fa
         createSession: async () => 'fixture-session',
         start: async function* () {
           yield { type: 'turn.created', id: 'turn', turnId: 'turn', previousTurnId: null, createdAt, threadId: null, state: { status: 'running' } };
+          if (nextFails) {
+            yield { type: 'turn.done', id: 'failure', createdAt, threadId: null, state: { status: 'error', message: '503 unavailable', completedAt: createdAt } };
+            return;
+          }
           const { proposalId, revision } = await tools.stage({ path, summary: 'Add an assertion',
             edits: [{ old: '    assert True', replacement: verdict === 'failed test' ? '    assert False' : '    assert 1 == 1' }] }) as typeof reference;
           reference = { proposalId, revision };
@@ -182,6 +187,17 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'deny', 'cancel', 'fa
       if (verdict === 'cancel') assert.equal(session.state.phase, 'cancelled');
       if (verdict === 'failed test') assert.equal(session.state.verification?.exitCode, 1);
       if (verdict === 'forged' || verdict === 'failed test' || verdict === 'interrupted') assert.equal(session.state.phase, 'failed');
+      if (verdict === 'allow') {
+        nextFails = true;
+        await session.submit('Follow-up change', true, undefined, true);
+        assert.equal(session.state.phase, 'failed');
+        assert.equal(writes, 1, 'an earlier approved edit must survive model failure');
+        assert.deepEqual(session.state.changes, { paths: [path], status: 'applied' });
+        assert.deepEqual(approved, ['allow', 'allow']);
+        await session.undoAgent();
+        assert.equal(writes, 0);
+        assert.deepEqual(session.state.changes, { paths: [path], status: 'undone' });
+      }
       assert.equal(await readFile(join(root, path), 'utf8'), source);
     } finally { await session.dispose(); await rm(root, { recursive: true, force: true }); }
   });

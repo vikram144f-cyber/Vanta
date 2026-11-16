@@ -111,6 +111,7 @@ export function activate(context: vscode.ExtensionContext) {
       return {
         serverUrl: config.get('serverUrl', 'http://localhost:8790'),
         model: config.get('model', '').trim(),
+        secondaryModel: config.get('secondaryModel', '').trim(),
         agentName: config.get('agentName', '').trim(),
         workspaceOverview: config.get('workspaceOverview', true),
         verificationPython: config.get('verificationPython', '').trim(),

@@ -20,6 +20,8 @@ VANTA is a desktop VS Code extension that streams a local TrueForge agent into A
 
 `vanta.serverUrl` defaults to `http://localhost:8790`. `vanta.model` optionally selects an exact model name reported by TrueForge. `vanta.workspaceOverview` enables the metadata tool in a trusted single-folder workspace. Set it to `false` for chat-only mode. In chat-only mode `vanta.agentName` can select a saved chat-only VANTA agent by name. A server with the default outbound policy can still stream chat and shows why the workspace tool was unavailable. [TrueForge quickstart](https://trueforge.dev/quickstart), [pinned outbound policy configuration](https://github.com/truefoundry/trueforge/blob/v0.185.1/packages/trueforge/src/config.ts).
 
+After a model failure, select another configured model in Agent Studio. Use **Restore prompt** to prepare a retry, or rerun Quick Edit from the editor. Set `vanta.secondaryModel` to another registered name to opt in to a single fallback after a confirmed early model failure. [Task C demonstration and recovery rules](docs/M6_VERIFICATION.md).
+
 ## Checks
 
 ```powershell
