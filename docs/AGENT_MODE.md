@@ -7,7 +7,7 @@ Set **VANTA: Verification Python** in User Settings to an absolute path to a tru
 1. Enable **Agent Mode** and **Share workspace context** in Agent Studio. Submit one request for changes to existing files.
 2. Use Context Explorer to see discovery results and the paths and reasons that entered the model context. Review the proposed files in Agent Studio. Selecting a hunk opens or navigates its native VS Code diff. Accept or reject each hunk, then choose **Approve selected hunks**. Related changes may depend on one another.
 3. Inspect the displayed pytest target. Choose **Allow once** to run that profile against a disposable snapshot with the accepted changes. Denying a gate, stopping before apply, a failed check or an incomplete TrueForge turn leaves the source buffers untouched.
-4. After verification and successful turn completion, VANTA checks the targets again and applies the accepted changes in one VS Code text edit batch. Use **File → Save All** to persist them. The Changes panel offers **Undo Agent changes** while the affected buffers still match the applied batch. Save again if you want to persist a buffer undo after saving the batch.
+4. After verification and successful turn completion, VANTA checks the targets again and applies the accepted changes in one VS Code text edit batch. If VS Code released a clean target buffer during review, VANTA reopens it and checks it against the staged source before applying. Use **File → Save All** to persist the accepted changes. The Changes panel offers **Undo Agent changes** while the affected buffers still match the applied batch. Save again if you want to persist a buffer undo after saving the batch.
 
 ## Definition and boundaries
 

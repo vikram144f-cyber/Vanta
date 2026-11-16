@@ -30,13 +30,21 @@ export async function editorAgent(preview: QuickEdit['previewChanges']): Promise
     preview: (id, file, hunk) => preview(`${id}-${file.hunks[0]!.id}`, file, hunk, 'Agent Mode'),
     apply: async (files, signal, begin) => {
       const entries = await Promise.all(files.map(async ({ base, after }) => {
-        const document = captured.get(base);
+        const staged = captured.get(base);
         const path = await repository.location(base.path, signal);
-        const disk = await repository.diskText(base.path, signal);
-        if (!document || normalizeWorkspacePath(document.uri.fsPath) !== path || disk !== base.text) {
+        if (!staged || normalizeWorkspacePath(staged.uri.fsPath) !== path) {
+          throw new VantaError(`Agent Mode target is no longer available: ${base.path}. Start a new request.`);
+        }
+        // VS Code can release an unopened source buffer while its virtual diff is under review.
+        const document = staged.isClosed ? await vscode.workspace.openTextDocument(staged.uri) : staged;
+        const version = document === staged ? base.version : document.version;
+        if (await repository.diskText(base.path, signal) !== base.text) {
           throw new VantaError(`Agent Mode target changed on disk: ${base.path}. Start a new request.`);
         }
-        return { path: base.path, document, version: base.version, before: base.text, after, current: () => document.getText() };
+        if (staged.version !== base.version) {
+          throw new VantaError(`Agent Mode target was edited since staging: ${base.path}. Start a new request.`);
+        }
+        return { path: base.path, document, version, before: base.text, after, current: () => document.getText() };
       }));
       const write = (selected: typeof entries[number][], undo: boolean) => {
         const edit = new vscode.WorkspaceEdit();

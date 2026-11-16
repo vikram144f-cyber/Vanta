@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
 import { TrueForgeError, TrueForgeTimeoutError } from '@truefoundry/trueforge-sdk';
 import type { OverviewBridge } from '../../src/mcp';
@@ -151,6 +152,29 @@ test('an ambiguous approval is sent once and revokes local access', async () => 
   assert.equal(calls.filter((call) => call === 'session').length, 1);
   assert.ok(calls.includes('grant') && calls.includes('revoke') && calls.includes('cancel'));
   assert.ok(calls.indexOf('grant') < calls.indexOf('revoke') && calls.indexOf('revoke') < calls.indexOf('cancel'));
+});
+
+test('a paused approval outlives the stream idle timeout and resumes only after a click', async () => {
+  const paused: Event = { type: 'turn.update', id: 'paused', createdAt, threadId: null, state: { status: 'paused' } };
+  const { session, calls, decisions } = setup({
+    start: async function* () { yield created; yield source; yield pending; yield paused; },
+    resume: async function* (sessionId, turnId, cursor) {
+      assert.deepEqual([sessionId, turnId, cursor], ['session-1', 'turn-1', paused.id]);
+      yield done;
+    },
+  }, undefined, {}, 20);
+  await session.refresh();
+  const waiting = new Promise<void>((resolve) => session.listen(() => { if (session.state.approval) resolve(); }));
+  const run = session.submit('test');
+  await waiting;
+  await sleep(60);
+  assert.equal(session.state.phase, 'approval');
+  assert.equal(decisions.length, 0);
+  assert.ok(!calls.includes('cancel'));
+  await session.decide('tool', true);
+  await run;
+  assert.deepEqual(decisions.map((decision) => decision.approval.status), ['allow']);
+  assert.equal(session.state.phase, 'completed');
 });
 
 for (const cancel of [false, true]) {

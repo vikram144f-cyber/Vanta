@@ -81,9 +81,18 @@ export async function run() {
   assert.ok(repo, 'Expected a trusted local workspace');
   const paths = ['agent-a.txt', 'agent-b.txt', 'agent-c.txt'];
   const source = 'original\r\n';
-  const deadline = AbortSignal.timeout(15_000);
   for (const path of paths) await writeFile(join(folder.uri.fsPath, path), source);
-  const approved = await Promise.all(paths.map(async (path) => ({ base: await repo.capture(path, deadline), after: 'reviewed\r\n', ids: [1] })));
+  const captureDeadline = AbortSignal.timeout(15_000);
+  const approved = await Promise.all(paths.map(async (path) => ({ base: await repo.capture(path, captureDeadline), after: 'reviewed\r\n', ids: [1] })));
+  const staged = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, paths[0]!));
+  // Exceed VS Code's document-reference cache to simulate expiry without waiting minutes.
+  for (let i = 0; i < 64 && !staged.isClosed; i++) {
+    const uri = vscode.Uri.joinPath(folder.uri, `background-${i}.txt`);
+    await writeFile(uri.fsPath, source);
+    await vscode.workspace.openTextDocument(uri);
+  }
+  assert.ok(staged.isClosed, 'Expected VS Code to release the staged document during review.');
+  const deadline = AbortSignal.timeout(15_000);
   let commits = 0;
   const apply = () => repo.apply(approved, deadline, () => { commits++; });
   const revert = await apply();
@@ -104,8 +113,14 @@ export async function run() {
   const clean = await repo.capture(removed, deadline);
   await unlink(join(folder.uri.fsPath, removed));
   await assert.rejects(repo.apply([{ base: clean, after: 'change\r\n', ids: [1] }], deadline, () => { commits++; }));
+  const changed = 'agent-changed.txt';
+  await writeFile(join(folder.uri.fsPath, changed), source);
+  const changedBase = await repo.capture(changed, deadline);
+  await writeFile(join(folder.uri.fsPath, changed), 'changed on disk\r\n');
+  await assert.rejects(repo.apply([{ base: changedBase, after: 'reviewed\r\n', ids: [1] }], deadline, () => { commits++; }), /changed on disk/);
+  assert.equal(await readFile(join(folder.uri.fsPath, changed), 'utf8'), 'changed on disk\r\n');
   assert.equal(commits, 1);
   assert.match(target.getText(), /^user edit/);
-  console.log('Agent Mode text-only WorkspaceEdit applied and undid three CRLF buffers, preserved disk, and rejected dirty and deleted targets.');
+  console.log('Agent Mode applied and undid three CRLF buffers after VS Code released a staged document, and rejected dirty, changed and deleted targets.');
   console.log('VANTA activated and its commands registered in the Windows Extension Host.');
 }
