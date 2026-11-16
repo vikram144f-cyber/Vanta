@@ -36,6 +36,9 @@ export type ModelFailure = {
 const chooseModel = 'Choose another configured model in Agent Studio, then retry.';
 
 export function modelFailure(message: string): ModelFailure {
+  if (/\bproperty\s+["']reasoning_content["']\s+is unsupported\b/i.test(message)) {
+    return { kind: 'other', detail: 'The model provider rejected the conversation history. Check the provider compatibility in TrueForge.' };
+  }
   if (/\b429\b|RESOURCE_EXHAUSTED|rate.limit|quota/i.test(message)) {
     if (/per[ _-]?day|daily|\blimit:\s*0\b/i.test(message)) {
       return { kind: 'rate-limit', limit: 'daily', detail: 'The provider reported a daily quota or zero available capacity for this model. Check the project quota or choose another configured model.' };
@@ -48,13 +51,14 @@ export function modelFailure(message: string): ModelFailure {
     const scope = limit === 'rpm' ? 'requests-per-minute limit' : limit === 'tpm' ? 'tokens-per-minute limit' : 'rate or quota limit';
     return { kind: 'rate-limit', limit, retrySeconds, detail: `The configured model reached its ${scope}.${retrySeconds ? ` Wait at least ${retrySeconds} seconds before retrying.` : ' Check the provider quota before retrying.'} You can also choose another configured model.` };
   }
-  if (/\binvalid[_ -]model\b|\bunknown[_ -]model\b|\bmodel[_ -]not[_ -]found\b|\bmodel\b[^\n]{0,180}\b(?:not found|does not exist|not registered|unsupported|not supported)\b/i.test(message)) {
+  const providerMessage = message.replace(/^\[Model Error\]\s*/i, '');
+  if (/\binvalid[_ -]model\b|\bunknown[_ -]model\b|\bmodel[_ -]not[_ -]found\b|\bmodel\b[^\n]{0,180}\b(?:not found|does not exist|not registered|unsupported|not supported)\b/i.test(providerMessage)) {
     return { kind: 'invalid', detail: `TrueForge or the provider did not recognize the configured model. ${chooseModel}` };
   }
   if (/timed?\s*out|\btimeout\b|UND_ERR_\w*TIMEOUT|\b504\b/i.test(message)) {
     return { kind: 'timeout', detail: `The model request timed out. ${chooseModel}` };
   }
-  if (/\b503\b|high demand|overload|service.unavailable|\bmodel\b[^\n]{0,140}\b(?:unavailable|not available|disabled)\b/i.test(message)) {
+  if (/\b503\b|high demand|overload|service.unavailable|\bmodel\b[^\n]{0,140}\b(?:unavailable|not available|disabled)\b/i.test(providerMessage)) {
     return { kind: 'unavailable', limit: 'overload', detail: 'The configured model is temporarily unavailable. Retry after a short delay or choose another configured model.' };
   }
   if (/\b(?:401|403|UNAUTHENTICATED|PERMISSION_DENIED)\b|API.key.{0,30}invalid/i.test(message)) {

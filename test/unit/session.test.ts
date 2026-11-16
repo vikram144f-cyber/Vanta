@@ -79,7 +79,8 @@ test('invalid configured model requires an explicit selection even if only one m
 });
 
 for (const [input, match] of [
-  ['Model fixture/removed not found', /did not recognize/],
+  ['[Model Error] Request failed (404): Model fixture/removed not found', /did not recognize/],
+  ["[Model Error] Request failed (400): 'messages.2' : for 'role:assistant' the following must be satisfied[('messages.2' : property 'reasoning_content' is unsupported)]", /provider rejected the conversation history/],
   ['503 SERVICE_UNAVAILABLE', /temporarily unavailable/],
   ['429 RESOURCE_EXHAUSTED retry in 12s', /Wait at least 12 seconds/],
   ['Cannot connect to API: Headers Timeout Error', /timed out/],

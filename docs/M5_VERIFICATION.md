@@ -108,3 +108,15 @@ Session `01m7hr7emmfcv2k133qavgp8x9` ended after 22.7 seconds with `[Model Error
 The run stopped before repository discovery or staging. No native diff, human hunk approval, pytest approval or pytest result was produced. Nothing was applied or saved, and the final Flask CLI checks were not run. The pinned checkout remained clean. Task B remains unverified, and the run was not retried.
 
 In a separately requested retry using the same Gemma profile and verbatim prompt, session `01m7hrdphy5j3q2bpa8f3c2qh4` ended after 45.4 seconds with the same HTTP 500 and the same three lifecycle events. There were no tool calls, staged files, approvals, tests, or applied or saved changes. The pinned Flask checkout remained clean.
+
+## Groq GPT-OSS 120B rehearsal at `e04c9d5`
+
+The registered `groq/openai-gpt-oss-120b` profile routed to `openai/gpt-oss-120b` via the custom Groq endpoint. Native Agent Studio chat session `01m7j5bdpmxkprbhprqmy53wrr` returned `VANTA GROQ READY` and completed in about 0.94 seconds on TrueForge v0.185.1 and SDK v0.185.0.
+
+The official Task B prompt used that profile in session `01m7j5e8p12t7e9h9ymtc6j8wt`, turn `01m7j5e8pjkf94de8n7qtrezmz`. TrueForge initialized VANTA's MCP connector, streamed the assistant's `list_tools` call and recorded its successful tool result with the same call ID. The next model request replayed the assistant tool call and the tool result. Groq rejected `messages.2`, the assistant history entry, with HTTP 400 because `reasoning_content` was unsupported. The saved turn error had no separate upstream error code. The turn ended after about 1.09 seconds, before any repository reads or staging. A previously recorded plain-chat follow-up `01m7j5kqsdff4zn5vtd4xx3rba` failed with the same error without calling tools.
+
+An offline capture with the installed TrueForge and OpenAI-compatible adapter reproduced the request body with synthetic history. TrueForge converts stored `thinking_blocks` into reasoning parts, which the adapter serializes as `reasoning_content` in assistant history. The pinned adapter dropped `include_reasoning: false`. It forwarded `reasoning_history: false` but still serialized the field. Filtering the assistant reasoning part changed only the rejected field in the captured body and preserved the full tool call and result. With this model, the provider-side compatibility fix belongs at TrueForge's outgoing adapter boundary.
+
+VANTA had classified the `[Model Error]` wrapper and the trailing word `unsupported` as an unrecognized model. Agent Studio now identifies the conversation history rejection with a sanitized message. All 36 targeted session tests, typecheck, scoped lint and build passed. The adapter capture was offline. No new model request was made.
+
+**Task B remains unverified.** The live run reached neither native diff review nor either approval. Pytest, buffer application, Save All and the final saved Flask checks did not run. The pinned Flask checkout was confirmed clean at `22d924701a6ae2e4cd01e9a15bbaf3946094af65`.
