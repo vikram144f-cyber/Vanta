@@ -52,7 +52,7 @@ function sourceEvidence<T extends { items: readonly (Snippet & { reason?: string
     : 'No new source was returned. Use previous evidence or report the specific missing context. Do not repeat these ranges.';
   return [JSON.stringify(metadata), guidance, ...items.map((item) => {
     const { path, reason, pythonBoundary, continuation = [] } = item;
-    const boundary = pythonBoundary && `Python function ends at line ${pythonBoundary.end}.`
+    const boundary = pythonBoundary && `Python function ends at line ${pythonBoundary.end}. It starts at line ${pythonBoundary.start}.`
       + (pythonBoundary.nextStart === undefined ? '' : ` The next top-level statement starts at line ${pythonBoundary.nextStart}.`);
     const blocks = [item, ...continuation];
     return [boundary, ...blocks.flatMap(({ start, end, text }, index) => {
@@ -197,11 +197,13 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
         } catch (error) { return failure(error instanceof VantaError ? error.message : 'Agent Mode could not complete this operation.'); }
       };
       server.registerTool(stageAgentTool, {
-        description: 'Stage all changes for one existing file. Provide its exact relative path and unique verbatim old text anchors plus their replacements. No workspace writes.',
+        description: 'Stage all changes for one existing file. Each old value must match exactly once, including indentation; replacement replaces the entire old text. For insertion, keep the anchor in replacement. Example for a source line indented by four spaces: '
+          + JSON.stringify({ path: 'example.py', summary: 'Record completion', edits: [{ old: '    return result', replacement: '    record(result)\n    return result' }] })
+          + '. Use an anchor from one contiguous source block. No workspace writes.',
         inputSchema: stageAgentSchema, annotations: readOnly,
       }, (proposal) => act(() => agent.stage(proposal)));
       server.registerTool('stage_related_edits', {
-        description: 'Stage up to five related existing files together. Each file has unique old text anchors and replacements. Returns per-file results and the highest revision.',
+        description: 'Stage up to five related existing files together using the stage_file_edit contract. Returns per-file results and the highest revision.',
         inputSchema: { files: z.array(stageAgentSchema).min(1).max(5) }, annotations: readOnly,
       }, ({ files }) => act(async () => {
         const outcomes = await Promise.allSettled(files.map((file) => agent.stage(file)));

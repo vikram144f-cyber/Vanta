@@ -207,9 +207,7 @@ export class Repository {
     await this.verify();
     signal.throwIfAborted();
     if (Buffer.byteLength(text) > maxFileBytes || text.includes('\0')) throw new VantaError('File is too large or is binary.');
-    const lines = text.split(/\r\n|\n|\r/).map((line) =>
-      /-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*["']?\s*[:=]\s*["'][^"']{8,}|\b(?:gh[pousr]_|sk-[a-z]|AIza)[A-Za-z0-9_-]{16,}/i.test(line)
-        ? '[Potential credential redacted]' : line);
+    const lines = redactSourceLines(text);
     return { lines, source: buffer === undefined ? 'disk' : 'editor buffer' };
   }
 
@@ -280,4 +278,10 @@ export class Repository {
     }
     return checked;
   }
+}
+
+export function redactSourceLines(text: string): string[] {
+  return text.split(/\r\n|\n|\r/).map((line) =>
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*["']?\s*[:=]\s*["'][^"']{8,}|\b(?:gh[pousr]_|sk-[a-z]|AIza)[A-Za-z0-9_-]{16,}/i.test(line)
+      ? '[Potential credential redacted]' : line);
 }

@@ -51,7 +51,7 @@ function snippet(path: string, file: SourceFile, start: number, end: number): Sn
 }
 
 function boundaryExcerpt(excerpt: Snippet, file: SourceFile, boundary: PythonBoundary, maxLines: number): Snippet {
-  const lines = new Set<number>();
+  const lines = new Set<number>([boundary.start]);
   for (let line = Math.max(excerpt.start, boundary.start, boundary.end - 2); line <= boundary.end; line++) lines.add(line);
   if (boundary.nextStart !== undefined) lines.add(boundary.nextStart);
   if (boundary.nextDeclaration !== undefined) lines.add(boundary.nextDeclaration);
@@ -399,6 +399,10 @@ export class ContextEngine {
           const tests = hit.file.lines.flatMap((line, index) => /^(?:async\s+)?def test_|^\s*(?:test|it|describe)\s*\(/.test(line) ? [index] : []);
           const test = tests.find((index) => index + 1 >= hit.start) ?? tests.at(-1) ?? -1;
           nearby(test, 'Existing test definition');
+          if (/\b(?:cli|commands?)\b/i.test(query)) {
+            const invocation = hit.file.lines.findIndex((line) => /\b\w+\.invoke\(\s*[\w.]+\s*,\s*\[/.test(line));
+            nearby(invocation, 'Existing test invocation: command entry point, arguments and assertions', 12);
+          }
         } else {
           const headings = hit.file.lines.flatMap((line, index) => index > 2 && (
             /^#{2,4}\s+/.test(line) || (/^[-~=^]{3,}\s*$/.test(line) && !!hit.file.lines[index - 1]?.trim())

@@ -39,6 +39,7 @@ export interface StudioState {
   sessionId?: string;
   activeModel?: string;
   retry?: { prompt: string; shareContext: boolean; agentMode: boolean };
+  revision?: { id: string; needsFeedback: boolean };
   approval?: Approval;
   error?: string;
   context?: ContextReport[];
@@ -57,6 +58,7 @@ export type StudioAction =
   | { type: 'openContext'; path: string; line: number }
   | { type: 'reviewHunk'; id: string; hunk: number; decision: 'accepted' | 'rejected' | 'view' }
   | { type: 'finishReview'; id: string; apply: boolean }
+  | { type: 'reviseProposal'; id: string; diagnostic: string }
   | { type: 'rejectRemaining'; id: string }
   | { type: 'decideApproval'; id: string; allow: boolean };
 
@@ -104,6 +106,12 @@ export function parseStudioAction(value: unknown): StudioAction | undefined {
     case 'finishReview':
       if ('id' in value && typeof value.id === 'string' && value.id.length === 36 && 'apply' in value && typeof value.apply === 'boolean') {
         return { type: value.type, id: value.id, apply: value.apply };
+      }
+      return;
+    case 'reviseProposal':
+      if ('id' in value && typeof value.id === 'string' && value.id.length === 36
+        && 'diagnostic' in value && typeof value.diagnostic === 'string' && value.diagnostic.length <= 4000) {
+        return { type: value.type, id: value.id, diagnostic: value.diagnostic.trim() };
       }
       return;
     case 'rejectRemaining':

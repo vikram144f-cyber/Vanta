@@ -189,6 +189,8 @@ function Studio() {
       </div>
       {state.sessionId && <p className="muted context-note">{state.agentMode ? 'Agent Mode uses a separate TrueForge session for each request.'
         : state.quickEdit ? 'Quick Edit uses a separate TrueForge session.' : 'Follow-ups can use context shared earlier in this conversation.'}</p>}
+      {state.revision && !busy && <p className="muted context-note">{state.revision.needsFeedback ? 'Enter the specific failure or checker result above. ' : ''}
+        Request revision sends the failed edits and your feedback to the selected model in a fresh run. Include only diagnostics you want to share.</p>}
       <div className="composer-footer">
         <button type="button" className="subtle" disabled={busy || !messages.length} onClick={() => {
           host.postMessage({ type: 'clearConversation' });
@@ -201,6 +203,13 @@ function Studio() {
           setAgentMode(state.retry.agentMode);
           prompt.current?.focus();
         }}>Restore prompt</button>}
+        {state.revision && !busy && <button type="button" disabled={connection.status !== 'connected' || !connection.selectedModel
+          || draft.trim().length > 4000 || (state.revision.needsFeedback && !draft.trim())}
+          onClick={() => {
+            if (!state.revision) return;
+            host.postMessage({ type: 'reviseProposal', id: state.revision.id, diagnostic: draft.trim() });
+            setDraft('');
+          }}>Request revision</button>}
         {busy ? <button type="button" disabled={phase === 'cancelling'} onClick={() => host.postMessage({ type: 'cancelRun' })}>Stop</button>
           : <button className="primary" disabled={!canSend || !draft.trim()} type="submit">Send</button>}
       </div>

@@ -77,6 +77,9 @@ test('Agent Mode bundle includes nearby implementation, test, and documentation 
     code[78] = 'app.cli.add_command(config_command)';
     const tests = Array.from({ length: 45 }, (_, index) => `# unrelated test line ${index + 1}`);
     tests[0] = 'def test_config_command():';
+    tests[16] = 'def test_existing_entry_point(runner, app_cli):';
+    tests[17] = '    result = runner.invoke(app_cli, ["status"])';
+    tests[18] = '    assert result.exit_code == 0';
     tests[30] = '    assert "config command JSON SECRET masking"';
     const docs = Array.from({ length: 45 }, (_, index) => `CLI notes ${index + 1}`);
     docs[24] = 'Usage details';
@@ -96,6 +99,8 @@ test('Agent Mode bundle includes nearby implementation, test, and documentation 
     assert.match(serialized, /Existing handler definition/);
     assert.match(serialized, /def config_command/);
     assert.match(serialized, /Existing test definition/);
+    assert.match(serialized, /Existing test invocation/);
+    assert.match(serialized, /runner\.invoke\(app_cli/);
     assert.match(serialized, /Existing documentation section/);
     assert.equal(result.items[2]?.path, 'docs/cli.rst');
     assert.ok(reports.at(-1)?.hits.some((hit) => hit.path === 'src/flask/cli.py'));
@@ -154,12 +159,15 @@ test('Agent Mode reserves source lines for actual Python boundaries across a cli
     const clipped = { path, start: 3, end: 32 };
     const result = await context.readRanges([clipped], 24, signal);
     const read = result.items[0]!;
+    assert.equal(read.start, 1);
+    assert.match(read.text, /^def build_routes\(\):/);
     assert.equal(read.pythonBoundary?.end, 49);
     assert.equal([read, ...read.continuation ?? []].reduce((count, block) => count + block.end - block.start + 1, 0), 24);
     assert.equal((await context.readRanges([clipped], 24, signal)).ranges[0]?.status, 'already_shared');
     lines[48] = '    return reversed(items)';
     await writeFile(join(root, path), lines.join('\n'));
-    assert.match((await context.readRanges([clipped], 24, signal)).items[0]?.continuation?.[0]?.text ?? '', /return reversed/);
+    const changed = (await context.readRanges([clipped], 24, signal)).items[0]!;
+    assert.match([changed, ...changed.continuation ?? []].map(({ text }) => text).join('\n'), /return reversed/);
     const limited = new ContextEngine(repository, 60, () => undefined, true, process.env.VANTA_TEST_PYTHON);
     assert.equal((await limited.readRanges([clipped], 24, signal)).ranges[0]?.status, 'budget_skipped');
   } finally { await rm(root, { recursive: true, force: true }); }

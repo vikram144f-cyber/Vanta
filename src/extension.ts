@@ -55,6 +55,7 @@ class StudioView implements vscode.WebviewViewProvider {
         case 'decideApproval': void this.session.decide(action.id, action.allow); break;
         case 'reviewHunk': void this.session.reviewHunk(action.id, action.hunk, action.decision); break;
         case 'finishReview': void this.session.finishReview(action.id, action.apply); break;
+        case 'reviseProposal': void this.session.reviseProposal(action.id, action.diagnostic); break;
         case 'rejectRemaining': this.session.rejectRemaining(action.id); break;
         case 'openContext':
           if (this.session.hasLocation(action.path, action.line)) void openContext(action.path, action.line);

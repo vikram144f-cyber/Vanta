@@ -205,10 +205,13 @@ test('Agent MCP labels omitted Python source and can pace tool replies', { skip:
     assert.ok(performance.now() - started >= replyDelayMs - 5);
     const result = await client.callTool({ name: 'read_workspace_ranges', arguments: { ranges: [{ path: 'sample.py', start: 1, end: 32 }] } });
     const text = (result.content as { text: string }[])[0]!.text;
-    assert.match(text, /Python function ends at line 37\. The next top-level statement starts at line 39\./);
+    assert.match(text, /Python function ends at line 37\. It starts at line 1\. The next top-level statement starts at line 39\./);
     assert.match(text, /Lines 21-34 omitted\. Source blocks are not adjacent\./);
     assert.match(text, /Source "sample.py" lines 35-37:\n    pass\n    pass\n    return True/);
     assert.match(text, /Source "sample.py" lines 39-39:\nhandler = collect/);
+    const tool = (await client.listTools()).tools.find((item) => item.name === 'stage_file_edit');
+    assert.match(tool?.description ?? '', /"old":"    return result"/);
+    assert.match(tool?.description ?? '', /"replacement":"    record\(result\)\\n    return result"/);
   } finally {
     await client.close();
     await bridge.close();
