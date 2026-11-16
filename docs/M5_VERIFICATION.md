@@ -186,3 +186,11 @@ The verbatim Task B prompt ran in session `01m7jbfmbf590jy4vd3hxqxwt8`, turn `01
 The pre-approval replay reconstructed the proposal from the successful staging arguments. The model again used the `click.echo("No routes were registered.")` anchor inside `routes_command` and inserted the new command before the indented `return`. Python reported `IndentationError: unexpected indent` at staged `src/flask/cli.py:1095`. The new command also used case-sensitive matching, and the proposed test invoked the plain `CliRunner` without a CLI command object. The proposal could not proceed to independent CLI execution or pytest.
 
 Native Discard produced deny event `01m7jbhf4yp5atnzj2rwezsnab`. The model tried to reopen review and TrueForge cancelled the run. No approval was granted, pytest did not run, and nothing was applied or saved. Git confirmed the pinned checkout was clean. No additional model turn was submitted.
+
+### Live check on the review-delay fix
+
+The real Windows Extension Host regression for `85c7b97` reproduced the original failure when VS Code closed an unchanged staged source buffer. The same check passed after the fix, including apply, undo, and rejection of changed targets. The mocked session check also confirmed that a paused approval outlives the stream idle timeout and resumes only after an explicit decision.
+
+After reloading the fixed build, one native Task B run submitted the official prompt with Gemini 3.5 Flash Lite on stock TrueForge v0.185.1. Session `01m7jda9xvtk22v0498m5ygsj1`, turn `01m7jda9yawfeq87zscd06a71g`, found the implementation, tests, and documentation. Several staging calls failed exact-anchor validation. The only successful staging call added a `config_command` function using `key.upper()`. It omitted registration, tests and documentation. Later attempts to append to the already-staged file were rejected. The provider returned HTTP 429 for the 15 RPM bucket after 44.8 seconds.
+
+The live run ended before native review, so it did not exercise delayed approval. No approval, pytest, CLI acceptance, apply, or save occurred. The pinned Flask checkout remained clean.
