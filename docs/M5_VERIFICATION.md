@@ -98,3 +98,11 @@ On November 16, 2026, the Windows Extension Development Host submitted the offic
 Session `01m7hqr1f84vke9efckp6p7yq7` returned repository evidence for `src/flask/cli.py`, `tests/test_cli.py`, `docs/cli.rst`, `tests/test_config.py` and `src/flask/config.py`. The turn ended in error after 28.8 seconds. Google reported HTTP 429 for the free-tier requests-per-minute limit of 5 and advised waiting 33.3 seconds. Its error labeled the quota bucket `gemini-3.6-flash`. That is the provider's reported label. The selected and recorded TrueForge profile was Gemini 3.5 Flash.
 
 No files were staged, applied or saved. The run did not reach native diff review or either approval gate. Pytest did not run, and the final Flask CLI checks were not run. The disposable checkout remained clean at `22d924701a6ae2e4cd01e9a15bbaf3946094af65`, with no patch to preserve or restore. Task B remains unverified. The run was not retried.
+
+## Gemma 4 31B acceptance rehearsal at `2112bfc`
+
+Windows Agent Studio submitted the exact Task B prompt once through TrueForge v0.185.1 using `google-gemini/gemma-4-31b-it`. The disposable Flask 3.1.3 checkout was clean at `22d924701a6ae2e4cd01e9a15bbaf3946094af65`, with no source editors open or file attachments on the prompt.
+
+Session `01m7hr7emmfcv2k133qavgp8x9` ended after 22.7 seconds with `[Model Error] Request failed (500): Internal error encountered.` The trace contained only `turn.created`, `mcp.initialize` and `turn.done`, with zero reported model tokens. The provider response did not identify a cause beyond HTTP 500. No quota error was reported.
+
+The run stopped before repository discovery or staging. No native diff, human hunk approval, pytest approval or pytest result was produced. Nothing was applied or saved, and the final Flask CLI checks were not run. The pinned checkout remained clean. Task B remains unverified, and the run was not retried.
