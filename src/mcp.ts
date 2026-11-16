@@ -8,14 +8,14 @@ import type { Connector } from './trueforge';
 import { overviewToolName, VantaError } from './trueforge';
 import { bindOverview } from './workspace';
 import type { WorkspaceScope } from './workspace';
-import type { ContextEngine } from './context';
+import type { ContextEngine, Snippet } from './context';
 import { proposeTool, proposalSchema, reviewSchema, reviewTool } from './quickPatch';
 import type { QuickPatch, ReviewReceipt } from './quickPatch';
 import { reviewAgentSchema, reviewAgentTool, stageAgentSchema, stageAgentTool, verifyAgentSchema, verifyAgentTool } from './agentPatch';
-import type { AgentReceipt, FileProposal, ReviewReference } from './agentPatch';
+import type { AgentPatch, AgentReceipt, FileProposal, ReviewReference } from './agentPatch';
 
 export interface AgentTools {
-  stage(proposal: FileProposal): Promise<unknown>;
+  stage(proposal: FileProposal): Promise<ReturnType<AgentPatch['stage']>>;
   review(reference: ReviewReference): AgentReceipt;
   verify(target: string): Promise<unknown>;
 }
@@ -43,6 +43,16 @@ async function readJson(request: IncomingMessage, limit: number): Promise<unknow
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
 }
 
+const agentReadLimit = 8;
+
+function sourceEvidence<T extends { items: readonly (Snippet & { reason?: string })[] }>({ items, ...metadata }: T) {
+  const guidance = items.length
+    ? 'Use the source blocks as evidence. Stage once the needed anchors are present.'
+    : 'No new source was returned. Use previous evidence or report the specific missing context. Do not repeat these ranges.';
+  return [JSON.stringify(metadata), guidance, ...items.map(({ path, start, end, text, reason }) =>
+    `Source ${JSON.stringify(path)} lines ${start}-${end}${reason ? ` (${reason})` : ''}:\n${text}`)].join('\n\n');
+}
+
 export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSignal, name = `vanta-run-${randomUUID()}`, context?: ContextEngine, quick?: QuickTools, agent?: AgentTools): Promise<OverviewBridge> {
   signal.throwIfAborted();
   const overview = await bindOverview(scope);
@@ -56,15 +66,19 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
   let reading = false;
   let operations = 0;
   const failure = (message: string) => ({ isError: true, content: [{ type: 'text' as const, text: message }] });
-  const expose = async (operation: (current: ContextEngine, deadline: AbortSignal) => Promise<unknown>) => {
+  const expose = async <T extends object>(operation: (current: ContextEngine, deadline: AbortSignal) => Promise<T>, render?: (result: T & { readsRemaining: number }) => string) => {
     if (!context || closed || signal.aborted || !scope.isAvailable()) return failure('Enable workspace context for this turn in VANTA to use repository tools.');
-    if (reading || operations >= 24) return failure('Repository tools allow one call at a time and at most 24 calls per turn.');
+    if (reading) return failure('Repository tools allow one call at a time.');
+    if (operations >= (agent ? agentReadLimit : 24)) return failure(agent
+      ? 'Agent Mode repository read limit reached. Use prior evidence to stage changes if sufficient, or report what is missing. No further reads are available in this run.'
+      : 'Repository tools allow at most 24 calls per turn.');
     reading = true;
     operations++;
     try {
       const result = await operation(context, AbortSignal.any([signal, AbortSignal.timeout(7500)]));
       if (closed || signal.aborted || !scope.isAvailable()) return failure('The workspace scope ended.');
-      return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      const reply = { ...result, readsRemaining: agentReadLimit - operations };
+      return { content: [{ type: 'text' as const, text: render ? render(reply) : JSON.stringify(agent ? reply : result) }] };
     } catch (error) {
       return failure(error instanceof VantaError ? error.message : 'Repository lookup failed or exceeded its time limit.');
     } finally { reading = false; }
@@ -118,12 +132,15 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
     server.registerTool('read_file', {
       description: 'Read up to 60 lines from a known relative path. Line numbers start at 1.',
       inputSchema: { path, start: line.optional(), end: line.optional() }, annotations: readOnly,
-    }, (args) => expose((repo, deadline) => {
+    }, (args) => {
       const start = args.start ?? 1;
       const end = args.end ?? start + 29;
-      if (end < start) throw new VantaError('End line must be at or after the start line.');
-      return repo.read(args.path, start, end, deadline);
-    }));
+      if (agent) return expose((repo, deadline) => repo.readRanges([{ path: args.path, start, end }], 60, deadline), sourceEvidence);
+      return expose((repo, deadline) => {
+        if (end < start) throw new VantaError('End line must be at or after the start line.');
+        return repo.read(args.path, start, end, deadline);
+      });
+    });
     server.registerTool('find_symbol', {
       description: 'Find symbol definitions by exact or partial name, optionally in a single relative path.',
       inputSchema: { query, path: path.optional() }, annotations: readOnly,
@@ -131,7 +148,7 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
     server.registerTool('get_context_bundle', {
       description: 'Rank relevant repository locations for a natural-language task, with bounded snippets and selection reasons. Use for unexplored tasks involving code, tests and documentation.',
       inputSchema: { query }, annotations: readOnly,
-    }, (args) => expose((repo, deadline) => repo.bundle(args.query, deadline)));
+    }, (args) => expose(async (repo, deadline) => ({ ...await repo.bundle(args.query, deadline), remainingTokens: repo.remainingTokens }), agent ? sourceEvidence : undefined));
     if (quick) {
       const edit = (operation: () => unknown) => {
         if (closed || signal.aborted || !scope.isAvailable()) return failure('The Quick Edit scope ended.');
@@ -153,15 +170,10 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
     }
     if (agent) {
       server.registerTool('read_workspace_ranges', {
-        description: 'Read up to five known workspace ranges together. Each range returns up to 24 lines. Use it to collect exact anchors in related files.',
+        description: 'Get missing anchors across up to five known ranges in one call, at most 24 lines per range. Reuse already shared source and check the returned range statuses.',
         inputSchema: { ranges: z.array(z.strictObject({ path, start: line, end: line })).min(1).max(5) },
         annotations: readOnly,
-      }, ({ ranges }) => expose((repo, deadline) => Promise.all(ranges.map((range) =>
-        repo.read(range.path, range.start, Math.max(range.start, Math.min(range.end, range.start + 23)), deadline)
-          .catch((error: unknown) => {
-            deadline.throwIfAborted();
-            return { path: range.path, error: error instanceof VantaError ? error.message : 'Could not read this range.' };
-          })))));
+      }, ({ ranges }) => expose((repo, deadline) => repo.readRanges(ranges, 24, deadline), sourceEvidence));
       const act = async (operation: () => unknown) => {
         if (closed || signal.aborted || !scope.isAvailable()) return failure('The Agent Mode scope ended.');
         try {
@@ -178,9 +190,18 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
         description: 'Stage up to five related existing files together. Each file has unique old text anchors and replacements. Returns per-file results and the highest revision.',
         inputSchema: { files: z.array(stageAgentSchema).min(1).max(5) }, annotations: readOnly,
       }, ({ files }) => act(async () => {
-        const results = await Promise.allSettled(files.map((file) => agent.stage(file)));
-        return results.map((result, index) => result.status === 'fulfilled' ? result.value
-          : { path: files[index]?.path, error: result.reason instanceof VantaError ? result.reason.message : 'The file could not be staged.' });
+        const outcomes = await Promise.allSettled(files.map((file) => agent.stage(file)));
+        let review: ReviewReference | null = null;
+        const results = outcomes.map((result, index) => {
+          if (result.status === 'rejected') return { path: files[index]?.path, status: 'rejected',
+            error: result.reason instanceof VantaError ? result.reason.message : 'The file could not be staged.' };
+          const { proposalId, revision, path, hunks } = result.value;
+          if (!review || revision > review.revision) review = { proposalId, revision };
+          return { path, hunks, status: 'staged' };
+        });
+        return { results, review, next: outcomes.some((outcome) => outcome.status === 'rejected')
+          ? 'Correct only rejected files. Reuse source already returned. Use the latest revision after corrections.'
+          : 'If these files cover the task, call review_changes now with the review reference.' };
       }));
       server.registerTool(reviewAgentTool, {
         description: 'Open native multi-file review with the latest proposal ID and revision. Return the receipt for selected hunks. Approval required.',

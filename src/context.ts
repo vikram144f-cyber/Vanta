@@ -23,7 +23,8 @@ export interface ContextReport {
   backend?: string;
 }
 
-interface Snippet extends Location { text: string; source: SourceFile['source'] }
+export interface Snippet extends Location { text: string; source: SourceFile['source'] }
+type RangeResult = Location & { requestedEnd: number; status: 'returned' | 'already_shared' | 'budget_skipped' | 'unavailable'; error?: string };
 interface Candidate extends ContextHit { score: number; file: SourceFile }
 
 function terms(query: string): string[] {
@@ -76,12 +77,15 @@ export function parseMentions(prompt: string): Mention[] {
 export class ContextEngine {
   #spent = 0;
   readonly #seen = new Map<string, Location[]>();
+  readonly #sharedLines = new Map<string, Map<number, string>>();
 
   constructor(readonly repository: Repository, readonly budget: number, private readonly publish: (report: ContextReport) => void,
     private readonly agentMode = false) {}
 
-  #emit(operation: string, hits: ContextHit[], items: unknown[], limit: number, limited = false, backend?: string) {
-    const output: unknown[] = [];
+  get remainingTokens() { return Math.max(0, this.budget - this.#spent); }
+
+  #emit<T>(operation: string, hits: ContextHit[], items: T[], limit: number, limited = false, backend?: string) {
+    const output: T[] = [];
     let omitted = 0;
     const remaining = Math.min(limit, this.budget - this.#spent);
     const payload = (entries: unknown[]) => ({ items: entries, limited, totalBudget: this.budget });
@@ -176,6 +180,45 @@ export class ContextEngine {
     return this.#emit('Open file', [{ path, start, end: excerpt.end, reason: `Requested range · ${file.source}`, selected: false }], [excerpt], 2200);
   }
 
+  #remember(excerpts: readonly Snippet[]) {
+    if (!this.agentMode) return;
+    for (const { path, start, text } of excerpts) {
+      const lines = this.#sharedLines.get(path) ?? new Map<number, string>();
+      text.split('\n').forEach((line, index) => lines.set(start + index, line));
+      this.#sharedLines.set(path, lines);
+    }
+  }
+
+  async readRanges(ranges: readonly Location[], maxLines: number, signal: AbortSignal) {
+    const results: RangeResult[] = [];
+    const items: Snippet[] = [];
+    for (const { path, start, end: requestedEnd } of ranges) {
+      const end = Math.min(requestedEnd, start + maxLines - 1);
+      const result: RangeResult = { path, start, end, requestedEnd, status: 'unavailable' };
+      results.push(result);
+      try {
+        if (end < start) throw new VantaError('End line must be at or after the start line.');
+        const file = await this.repository.read(path, signal);
+        const excerpt = snippet(path, file, start, end);
+        result.end = excerpt.end;
+        const shared = this.#sharedLines.get(path);
+        if (shared && excerpt.text.split('\n').every((line, index) => shared.get(start + index) === line)) {
+          result.status = 'already_shared';
+          continue;
+        }
+        const hit = { path, start, end: excerpt.end, reason: `Requested range · ${file.source}`, selected: false };
+        const output = this.#emit('Open file', [hit], [excerpt], 2200);
+        result.status = output.items.length ? 'returned' : 'budget_skipped';
+        items.push(...output.items);
+        this.#remember(output.items);
+      } catch (error) {
+        signal.throwIfAborted();
+        result.error = error instanceof VantaError ? error.message : 'Could not read this range.';
+      }
+    }
+    return { ranges: results, items, remainingTokens: this.remainingTokens };
+  }
+
   async mentions(references: Mention[], signal: AbortSignal) {
     const resolved: { excerpt: Snippet; hit: ContextHit }[] = [];
     for (const ref of references) {
@@ -214,6 +257,7 @@ export class ContextEngine {
     }
     const context = this.#emit('Explicit references', resolved.map((entry) => entry.hit), resolved.map((entry) => entry.excerpt), Math.floor(this.budget / 2));
     if (context.omitted) throw new VantaError('Explicit references exceed the context budget. Reference fewer files or increase the budget.');
+    this.#remember(context.items);
     return context.items;
   }
 
@@ -262,7 +306,14 @@ export class ContextEngine {
     const ranked = rank(candidates);
     // Give distinct implementation, test and docs evidence a chance before similar secondary matches.
     const group = (path: string) => /(^|\/)tests?\//i.test(path) ? 'test' : /(^|\/)docs?\//i.test(path) ? 'docs' : 'code';
-    const representatives = ['code', 'test', 'docs'].map((kind) => ranked.find((hit) => group(hit.path) === kind)).filter((hit) => !!hit);
+    const implementation = ranked.find((hit) => group(hit.path) === 'code');
+    const implementationStem = implementation?.path.split('/').at(-1)?.split('.')[0]?.toLowerCase();
+    const representatives = ['code', 'test', 'docs'].map((kind) => {
+      const matches = ranked.filter((hit) => group(hit.path) === kind);
+      if (!this.agentMode || kind === 'code' || !implementationStem || implementationStem.length < 3) return matches[0];
+      // Keep a matching sibling ahead of docs or tests for a different candidate module.
+      return matches.find((hit) => hit.path.split('/').at(-1)?.toLowerCase().split(/[^\p{L}\p{N}]+/u).includes(implementationStem)) ?? matches[0];
+    }).filter((hit) => !!hit);
     if (this.agentMode) {
       const extra: Candidate[] = [];
       for (const hit of representatives) {
@@ -295,7 +346,8 @@ export class ContextEngine {
           }
           nearby(handler, 'Existing handler definition', 22);
         } else if (kind === 'test') {
-          const test = hit.file.lines.findIndex((line) => /^(?:async\s+)?def test_|^(?:test|it|describe)\s*\(/.test(line));
+          const tests = hit.file.lines.flatMap((line, index) => /^(?:async\s+)?def test_|^\s*(?:test|it|describe)\s*\(/.test(line) ? [index] : []);
+          const test = tests.find((index) => index + 1 >= hit.start) ?? tests.at(-1) ?? -1;
           nearby(test, 'Existing test definition');
         } else {
           const headings = hit.file.lines.flatMap((line, index) => index > 2 && (
@@ -306,15 +358,17 @@ export class ContextEngine {
           nearby(next ?? -1, 'Existing documentation section');
         }
       }
+      // Keep implementation, test, and documentation landmarks ahead of secondary matches.
       ranked.unshift(...extra);
     }
     const fresh = [...new Set([...representatives, ...ranked])].filter((hit) => !(this.#seen.get(hit.path) ?? [])
       .some((sent) => sent.start <= hit.end && sent.end >= hit.start));
-    const top = fresh.slice(0, 12);
+    const top = fresh.slice(0, this.agentMode ? 9 : 12);
     const hits: ContextHit[] = top.map(({ path, start, end, reason, symbol, selected }) => ({ path, start, end, reason, symbol, selected }));
     const payload = top.map((hit) => ({ ...snippet(hit.path, hit.file, hit.start, hit.end), reason: hit.reason, symbol: hit.symbol }));
     const output = this.#emit('Context bundle', hits, payload, Math.floor(this.budget * (this.agentMode ? 0.46 : 0.6)), limited || fresh.length > top.length, backend);
     for (const hit of hits.filter((item) => item.selected)) this.#seen.set(hit.path, [...(this.#seen.get(hit.path) ?? []), hit]);
+    this.#remember(output.items);
     return output;
   }
 }

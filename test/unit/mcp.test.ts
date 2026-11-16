@@ -132,7 +132,7 @@ test('Agent MCP bounds batched ranges and rejects an unapproved command', async 
   const scope = { path: root, isAvailable: () => true };
   const signal = new AbortController().signal;
   const repo = await Repository.bind(scope, { ripgrep: false });
-  const context = new ContextEngine(repo, 8000, () => undefined);
+  const context = new ContextEngine(repo, 8000, () => undefined, true);
   const patch = new AgentPatch();
   const bridge = await startOverviewBridge(scope, signal, undefined, context, undefined, {
     stage: async (proposal) => {
@@ -150,11 +150,32 @@ test('Agent MCP bounds batched ranges and rejects an unapproved command', async 
     assert.match(JSON.stringify(result.content), /sample_24/);
     assert.doesNotMatch(JSON.stringify(result.content), /sample_25/);
     assert.match(JSON.stringify(result.content), /workspace policy/);
+    const asText = (response: Record<string, unknown>) => (response.content as { text: string }[])[0]!.text;
+    assert.match(asText(result), /"end":24,"requestedEnd":30,"status":"returned"/);
+    assert.ok(asText(result).includes('sample_22\nsample_23\nsample_24'));
+    const duplicate = await client.callTool({ name: 'read_file', arguments: { ...range, end: 24 } });
+    assert.match(asText(duplicate), /"status":"already_shared"/);
+    assert.doesNotMatch(asText(duplicate), /sample_24/);
+    const newLines = await client.callTool({ name: 'read_workspace_ranges', arguments: { ranges: [{ ...range, start: 23 }] } });
+    assert.match(asText(newLines), /sample_25/);
+    const sharedUnion = await client.callTool({ name: 'read_file', arguments: range });
+    assert.match(asText(sharedUnion), /"status":"already_shared"/);
     assert.equal((await client.callTool({ name: 'read_workspace_ranges', arguments: { ranges: Array(6).fill(range) } })).isError, true);
+    for (let i = 0; i < 4; i++) {
+      const listed = await client.callTool({ name: 'list_workspace_files', arguments: { query: 'sample' } });
+      assert.match(asText(listed), new RegExp(`"readsRemaining":${3 - i}`));
+    }
+    const exhausted = await client.callTool({ name: 'read_workspace_ranges', arguments: { ranges: [range] } });
+    assert.equal(exhausted.isError, true);
+    assert.match(asText(exhausted), /repository read limit reached/);
     const proposal = { path: 'sample.py', summary: 'Update sample', edits: [{ old: 'sample_24\n', replacement: 'reviewed\n' }] };
-    const batch = await client.callTool({ name: 'stage_related_edits', arguments: { files: [proposal, { ...proposal, path: '../sample.py' }] } });
-    assert.match(JSON.stringify(batch.content), /revision.+1/);
-    assert.match(JSON.stringify(batch.content), /workspace policy/);
+    await writeFile(join(root, 'another.py'), 'sample_24\n');
+    const batch = await client.callTool({ name: 'stage_related_edits', arguments: { files: [proposal, { ...proposal, path: '../sample.py' }, { ...proposal, path: 'another.py' }] } });
+    const staged = JSON.parse(asText(batch));
+    assert.deepEqual(staged.review, patch.reference);
+    assert.equal(staged.review.revision, 2);
+    assert.deepEqual(staged.results.map((item: { status: string }) => item.status), ['staged', 'rejected', 'staged']);
+    assert.match(staged.results[1].error, /workspace policy/);
     assert.match(await repo.diskText('sample.py', signal), /sample_24/);
     assert.equal((await client.callTool({ name: verifyAgentTool, arguments: { target: 'sample.py' } })).isError, true);
   } finally {

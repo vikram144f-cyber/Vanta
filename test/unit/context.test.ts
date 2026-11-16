@@ -85,6 +85,7 @@ test('Agent Mode bundle includes nearby implementation, test, and documentation 
     await writeFile(join(root, 'src/flask/cli.py'), code.join('\n'));
     await writeFile(join(root, 'tests/test_cli.py'), tests.join('\n'));
     await writeFile(join(root, 'docs/cli.rst'), docs.join('\n'));
+    await writeFile(join(root, 'docs/config.rst'), 'Config command JSON SECRET masking\n==================================\n');
 
     const repository = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
     const reports: ContextReport[] = [];
@@ -96,8 +97,23 @@ test('Agent Mode bundle includes nearby implementation, test, and documentation 
     assert.match(serialized, /def config_command/);
     assert.match(serialized, /Existing test definition/);
     assert.match(serialized, /Existing documentation section/);
+    assert.equal(result.items[2]?.path, 'docs/cli.rst');
     assert.ok(reports.at(-1)?.hits.some((hit) => hit.path === 'src/flask/cli.py'));
     assert.ok(reports.at(-1)?.hits.some((hit) => hit.path === 'tests/test_cli.py'));
     assert.ok(reports.at(-1)?.hits.some((hit) => hit.path === 'docs/cli.rst'));
+
+    const anchor = result.items.find((item) => item.reason === 'Existing handler definition')!;
+    const repeat = await context.readRanges([anchor], 24, signal);
+    assert.equal(repeat.ranges[0]?.status, 'already_shared');
+    assert.deepEqual(repeat.items, []);
+    code[21] = '    return {"ok": False}';
+    await writeFile(join(root, 'src/flask/cli.py'), code.join('\n'));
+    const updated = await context.readRanges([anchor], 24, signal);
+    assert.equal(updated.ranges[0]?.status, 'returned');
+    assert.match(updated.items[0]!.text, /False/);
+    const tooSmall = new ContextEngine(repository, 60, () => undefined, true);
+    const skipped = await tooSmall.readRanges([anchor], 24, signal);
+    assert.equal(skipped.ranges[0]?.status, 'budget_skipped');
+    assert.equal(skipped.remainingTokens, 60);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
