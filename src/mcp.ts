@@ -231,7 +231,7 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
         inputSchema: reviewAgentSchema, annotations: readOnly,
       }, (reference) => act(() => agent.review(reference)));
       server.registerTool(verifyAgentTool, {
-        description: 'Request approval to run pytest -q on one existing relative Python test file in a temporary copy with the approved changes. Returns command status and exit code.',
+        description: 'Request approval to run pytest -q on one existing relative Python test file in a temporary copy with the approved changes. Returns status and exit code. An eligible failure can return correction with failed test names and the file paths to restage for fresh review.',
         inputSchema: verifyAgentSchema,
       }, ({ target }) => act(() => agent.verify(target)));
     }

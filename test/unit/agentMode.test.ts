@@ -177,7 +177,7 @@ test('Ruff staging returns new undefined names, preserves baseline findings, and
   assert.equal(patch.reference.revision, 1);
 });
 
-for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject and revise', 'revision failure', 'revision without proposal', 'revision cancellation', 'rejected staging loop', 'invalid syntax', 'deny', 'cancel', 'failed test', 'interrupted', 'forged'] as const) {
+for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject and revise', 'revision failure', 'revision without proposal', 'revision cancellation', 'rejected staging loop', 'invalid syntax', 'deny', 'cancel', 'failed test', 'correct failed test', 'correction fails', 'interrupted', 'forged'] as const) {
   test(`Agent Mode patch and verification gates · ${verdict}`, { skip: !python, timeout: 15_000 }, async () => {
     assert.ok(python);
     const path = 'test_fixture.py';
@@ -199,6 +199,7 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
     const decisions: ApprovalEvent[] = [];
     const approved: string[] = [];
     const createdAt = '2026-11-14T00:00:00Z';
+    const autoCorrect = verdict === 'correct failed test' || verdict === 'correction fails';
     const pause = function* (name: string, args: unknown, id = name): Generator<Event> {
       const deferred = verdict === 'deferred';
       yield { type: 'model.message', id, createdAt, threadId: 'main', toolCalls: [{ id, type: 'function',
@@ -250,7 +251,7 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
             }
           }
           const edits = [{ old: '    assert True', replacement: verdict === 'invalid syntax' && inputs.length === 1 ? 'assert True\n    return'
-            : verdict === 'failed test' && inputs.length === 1 ? '    assert False' : '    assert 1 == 1' }];
+            : (verdict === 'failed test' || autoCorrect) && inputs.length === 1 ? '    assert False' : '    assert 1 == 1' }];
           if (verdict === 'reject and revise' && inputs.length === 1) edits.push({ old: '    assert 2 == 2', replacement: '    assert False' });
           const { proposalId, revision } = await tools.stage({ path, summary: 'Add an assertion', edits }) as typeof reference;
           reference = { proposalId, revision };
@@ -266,14 +267,29 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
               toolCalls: [{ id: last.toolCallId, sourceEventId: 'review_changes' }] };
             assert.fail('Discard should stop the original stream rather than resume after denial');
           }
-          if (last.toolCallId === 'review_changes' && last.approval.status === 'allow') {
-            yield response('review_changes', tools.review(reference));
-            yield* pause('run_verification', { target: path });
+          if (last.toolCallId.startsWith('review_changes') && last.approval.status === 'allow') {
+            yield response(last.toolCallId, tools.review(reference));
+            yield* pause('run_verification', { target: path }, last.toolCallId === 'review_changes' ? 'run_verification' : 'run_verification-correction');
             return;
           }
-          if (last.approval.status === 'allow') yield response('run_verification',
-            verdict === 'forged' ? { status: 'passed', exitCode: 0 } : await tools.verify(path));
-          if (verdict === 'failed test' && inputs.length === 1) assert.fail('The failed receipt should end the stream before more model calls');
+          if (last.approval.status === 'allow') {
+            const result = verdict === 'forged' ? { status: 'passed', exitCode: 0 } : await tools.verify(path);
+            yield response(last.toolCallId, result);
+            if (autoCorrect && last.toolCallId === 'run_verification') {
+              assert.deepEqual(result, { status: 'failed', exitCode: 1, digest: (result as { digest: string }).digest,
+                correction: { files: [path], failedTests: ['test_fixture'], failedLines: [2],
+                  assertions: [{ line: 2, source: 'assert False' }] } });
+              const stale = reference;
+              assert.throws(() => tools.review(stale), /local patch approval/);
+              await assert.rejects(tools.verify(path), /matching local approval/);
+              const next = await tools.stage({ path, summary: 'Correct the assertion', edits: [{ old: '    assert True',
+                replacement: verdict === 'correction fails' ? '    assert 3 == 4' : '    assert 1 == 1' }] });
+              reference = { proposalId: next.proposalId, revision: next.revision };
+              yield* pause('review_changes', reference, 'review_changes-correction');
+              return;
+            }
+            if (autoCorrect) assert.ok(!('correction' in (result as object)));
+          }
           if (verdict === 'interrupted') return;
           yield { type: 'turn.done', id: 'done', createdAt, threadId: null,
             state: { status: 'done', completedAt: createdAt, output: null, requiredActions: [] } };
@@ -385,10 +401,34 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
       await session.reviewHunk(shown.id, shown.hunks[0]!.id, 'accepted');
       await session.finishReview(shown.id, true);
       const command = await verification;
+      const correctedReview = autoCorrect ? when(() => session.state.review?.id !== shown.id ? session.state.review : undefined) : undefined;
       await assert.rejects(tools.verify(path), /matching local approval/);
       assert.equal(writes, 0);
       if (verdict === 'cancel') await session.cancel();
       else await session.decide(command.id, verdict !== 'deny');
+      if (correctedReview) {
+        const revised = await correctedReview;
+        const freshVerification = when(() => session.state.approval);
+        await session.finishReview(shown.id, true);
+        await session.decide(command.id, true);
+        assert.deepEqual(approved, ['allow', 'allow']);
+        assert.equal(writes, 0);
+        await session.reviewHunk(revised.id, revised.hunks[0]!.id, 'accepted');
+        await session.finishReview(revised.id, true);
+        const fresh = await freshVerification;
+        assert.notEqual(fresh.id, command.id);
+        assert.equal(writes, 0);
+        await session.decide(fresh.id, true);
+        await run;
+        assert.deepEqual(inputs, ['Change the test']);
+        assert.equal(sessions, 1);
+        assert.deepEqual(approved, ['allow', 'allow', 'allow', 'allow']);
+        assert.equal(writes, verdict === 'correction fails' ? 0 : 1);
+        assert.equal(session.state.phase, verdict === 'correction fails' ? 'failed' : 'completed');
+        assert.equal(cancellations, verdict === 'correction fails' ? 1 : 0);
+        assert.equal(await readFile(join(root, path), 'utf8'), source);
+        return;
+      }
       await run;
       const applies = verdict === 'allow' || verdict === 'deferred' || verdict === 'fallback';
       assert.equal(writes, applies ? 1 : 0);
@@ -404,7 +444,7 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
       if (verdict === 'cancel') assert.equal(session.state.phase, 'cancelled');
       if (verdict === 'failed test') {
         assert.equal(session.state.phase, 'failed');
-        assert.equal(cancellations, 1);
+        assert.equal(cancellations, 0);
         assert.match(session.state.error ?? '', /approved tests failed/);
         assert.equal(session.state.verification?.exitCode, 1);
         assert.deepEqual(session.state.revision, { id: shown.id });

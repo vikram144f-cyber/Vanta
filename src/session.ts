@@ -24,6 +24,15 @@ interface Gate {
   confirmed?: boolean;
 }
 
+type VerificationGate = Gate & {
+  target: string;
+  grant?: string;
+  failedTests?: string[];
+  result?: { digest: string; status: string; exitCode: number | null; correction?: {
+    files: string[]; failedTests: string[]; failedLines: number[]; assertions: { line: number; source: string }[];
+  } };
+};
+
 interface AgentRun {
   workspace: AgentWorkspace;
   scope: string;
@@ -38,7 +47,8 @@ interface AgentRun {
   committing?: boolean;
   review?: Gate & { blocked?: string };
   receipt?: AgentReceipt;
-  verification?: Gate & { target: string; grant?: string; failedTests?: string[]; result?: { digest: string; status: string; exitCode: number | null } };
+  verification?: VerificationGate;
+  repair?: { patch: AgentPatch; verification: VerificationGate; files: string[] };
   checking?: { promise: Promise<unknown>; stop: AbortController };
 }
 
@@ -512,6 +522,7 @@ export class StudioSession {
       if (run.terminal === 'completed' && editing) {
         if (editing.denied) this.#activity('Agent changes discarded');
         else if (!editing.receipt || !editing.review?.confirmed || !editing.verification?.confirmed || editing.verification.result?.status !== 'passed') {
+          if (editing.repair) throw new VantaError('The approved tests failed and no verified correction was completed. The patch was not applied.');
           if (run.revisionInput && !editing.review) throw new VantaError('The correction ended without a new proposal for native review.');
           throw new VantaError('Agent Mode requires reviewed hunks, a passing verification receipt and a completed TrueForge turn.');
         } else {
@@ -539,10 +550,11 @@ export class StudioSession {
       run.approval = undefined;
       quick?.patch?.revoke();
       const rejected = run.agent;
-      const verification = rejected?.verification?.result;
-      if (!run.revisionInput && rejected?.patch.files.size && rejected.scope === this.dependencies.scopeKey?.()
+      const failed = rejected?.verification?.result?.status === 'failed' || run.reviewExit ? rejected : run.terminal === 'failed' ? rejected?.repair : undefined;
+      const verification = failed?.verification?.result;
+      if (!run.revisionInput && rejected && failed?.patch.files.size && rejected.scope === this.dependencies.scopeKey?.()
         && ((run.reviewExit?.confirmed && run.reviewExit.feedback !== undefined) || verification?.status === 'failed')) {
-        const evidence = JSON.stringify([...rejected.patch.files.values()].map(({ base, summary, hunks }) => ({
+        const evidence = JSON.stringify([...failed.patch.files.values()].map(({ base, summary, hunks }) => ({
           path: base.path, summary: redactSourceLines(summary).join('\n'), edits: hunks.map(({ id, start, end, replacement, status }) => ({
             id, old: redactSourceLines(base.text.slice(start, end)).join('\n'), replacement: redactSourceLines(replacement).join('\n'), status,
             sourceBefore: redactSourceLines(base.text.slice(0, start)).slice(-2).map((line) => line.slice(-160)).join('\n'),
@@ -551,12 +563,12 @@ export class StudioSession {
         })));
         if (Buffer.byteLength(evidence) <= 48_000) {
           const diagnostic = rejected.review?.blocked && redactSourceLines(rejected.review.blocked).join('\n').slice(0, 1000);
-          this.#revision = { id: rejected.patch.id, scope: rejected.scope, prompt, evidence,
+          this.#revision = { id: failed.patch.id, scope: rejected.scope, prompt, evidence,
             diagnostic: diagnostic ?? (run.reviewExit ? 'The user rejected the proposal at native review. Inspect the hunk decisions and diagnose the change.' : undefined),
             staging: [...new Set([...rejected.rejectedEdits.values()].map(({ message }) => message))].slice(0, 5)
               .map((message) => redactSourceLines(message).join('\n').slice(0, 300)),
-            verification: verification && rejected.verification && `${pytestCommand(rejected.verification.target)}: ${verification.status}, exit ${verification.exitCode ?? 'unavailable'}`,
-            failedTests: rejected.verification?.failedTests };
+            verification: verification && failed.verification && `${pytestCommand(failed.verification.target)}: ${verification.status}, exit ${verification.exitCode ?? 'unavailable'}`,
+            failedTests: failed.verification?.failedTests };
         }
       }
       run.agent?.patch.close();
@@ -683,7 +695,8 @@ export class StudioSession {
         this.#set({ verification: { command: pytestCommand(target), status: 'running' } });
         try {
           const stop = new AbortController();
-          const checking = runPytest(agent.workspace.repository, agent.python, target, agent.patch.approved(receipt),
+          const files = agent.patch.approved(receipt);
+          const checking = runPytest(agent.workspace.repository, agent.python, target, files,
             AbortSignal.any([signal, stop.signal]), { fixtures: agent.fixtures });
           agent.checking = { promise: checking, stop };
           const result = await checking;
@@ -695,7 +708,23 @@ export class StudioSession {
           }
           this.#activity('Verification finished', `${result.status} · exit ${result.exitCode ?? 'unavailable'}`);
           // Keep test output local. Tests can emit data that pattern-based redaction misses.
-          return gate.result = { digest, status: result.status, exitCode: result.exitCode };
+          const targetFile = files.find(({ base }) => base.path === target);
+          const canCorrect = result.exitCode === 1 && gate.failedTests?.length && targetFile && !agent.repair && !run.revisionInput;
+          const failedLines = canCorrect ? [...new Set([...result.output.matchAll(/^([^\r\n:]+\.py):(\d{1,7}): AssertionError\r?$/gm)]
+            .filter((match) => match[1]?.replaceAll('\\', '/') === target).map((match) => Number(match[2])))].slice(0, 8) : [];
+          let correction: NonNullable<VerificationGate['result']>['correction'];
+          if (canCorrect && targetFile && gate.failedTests) {
+            // Echo only assertions introduced by the approved patch. Never send traceback text or runtime values.
+            const after = targetFile.after.split(/\r?\n/);
+            const original = new Set(targetFile.base.text.split(/\r?\n/).map((line) => line.trim()));
+            const assertions = failedLines.flatMap((line) => {
+              const source = after[line - 1]?.trim();
+              return source?.startsWith('assert ') && !original.has(source) && redactSourceLines(source)[0] === source
+                ? [{ line, source: source.slice(0, 240) }] : [];
+            });
+            correction = { files: receipt.files, failedTests: gate.failedTests, failedLines, assertions };
+          }
+          return gate.result = { digest, status: result.status, exitCode: result.exitCode, ...(correction ? { correction } : {}) };
         } catch (error) {
           this.#set({ verification: { command: pytestCommand(target), status: signal.aborted ? 'cancelled' : 'failed',
             exitCode: null, output: error instanceof VantaError ? error.message : 'Could not prepare or clean up the temporary snapshot.' } });
@@ -776,9 +805,13 @@ export class StudioSession {
         if (run.agent) {
           const agent = run.agent;
           if (canAllow && source.name === reviewAgentTool && !agent.review && !agent.staging && agent.patch.matches(source.reference)) {
+            if (agent.repair?.files.some((path) => !agent.patch.files.has(path))) {
+              throw new VantaError('The correction omitted files from the approved proposal. Nothing was applied.');
+            }
             return this.#prepareAgentReview(run, agent, run.approval);
           }
-          if (canAllow && source.name === verifyAgentTool && source.target && agent.review?.confirmed && !agent.verification) {
+          if (canAllow && source.name === verifyAgentTool && source.target && agent.review?.confirmed && !agent.verification
+            && (!agent.repair || source.target === agent.repair.verification.target)) {
             agent.verification = { id: call.id, target: source.target };
             const fixtures = agent.fixtures.length ? ` Configured fixtures in this snapshot: ${agent.fixtures.join(', ')}.` : '';
             this.#set({ phase: 'approval', approval: { id: call.id, canAllow: true, label: 'Run approved pytest profile',
@@ -814,6 +847,19 @@ export class StudioSession {
           if (verification?.id === event.toolCallId && verification.acknowledged && verification.result) {
             verification.confirmed = event.content === JSON.stringify(verification.result);
             if (verification.confirmed && verification.result.status === 'failed') {
+              const agent = run.agent;
+              const correction = verification.result.correction;
+              if (correction && !agent.repair && this.dependencies.scopeKey?.() === agent.scope) {
+                agent.patch.close();
+                agent.repair = { patch: agent.patch, verification, files: correction.files };
+                agent.patch = new AgentPatch();
+                agent.review = undefined;
+                agent.receipt = undefined;
+                agent.verification = undefined;
+                agent.rejectedEdits.clear();
+                this.#activity('Tests failed · one correction available', 'A corrected proposal will require fresh hunk review and test approval.');
+                break;
+              }
               run.terminal = 'failed';
               this.#activity('Tool returned', verifyAgentTool);
               this.#set({ error: 'The approved tests failed. See Test Results. The patch was not applied.' });

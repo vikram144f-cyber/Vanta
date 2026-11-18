@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { VantaError } from './trueforge';
 import type { Location, Repository, SourceFile, SymbolLocation } from './repository';
+import { rstHeadings } from './rst';
 import { pythonBoundaries } from './verification';
 import type { PythonBoundary, PythonExcerpt } from './verification';
 
@@ -33,7 +34,79 @@ export interface Snippet extends Location {
   continuation?: SourceBlock[];
 }
 type RangeResult = Location & { requestedEnd: number; status: 'returned' | 'already_shared' | 'budget_skipped' | 'unavailable'; error?: string };
-interface Candidate extends ContextHit { score: number; file: SourceFile }
+interface Candidate extends ContextHit { score: number; file: SourceFile; continuation?: SourceBlock[] }
+const registration = /\.(?:add|register|include|mount)(?:_[a-z]+)?\s*\(/i;
+const registrationTarget = /\.(?:add|register|include|mount)(?:_[a-z]+)?\s*\(\s*([\w$]+)\s*[,)]/i;
+const commandDecorator = /^@[\w.]+\.command\(\s*['"]([\w-]+)['"]/;
+const commandInvocation = /\b\w+\.invoke\(\s*[\w.]+\s*,\s*\[\s*(?:['"]([\w-]+)['"])?/;
+
+function documentedEntryPoints(candidate: Candidate, implementation: Candidate) {
+  if (!/\.rst$/i.test(candidate.path)) return [];
+  const names = new Set(implementation.file.lines.flatMap((line) => {
+    const name = registrationTarget.exec(line)?.[1];
+    return name ? [name] : [];
+  }));
+  if (!names.size) return [];
+  const lines = candidate.file.lines;
+  const headings = rstHeadings(lines);
+  return headings.flatMap((heading, index): Candidate[] => {
+    const end = Math.min((headings[index + 1]?.start ?? lines.length + 1) - 1, heading.end + 14);
+    const namesInSection = lines.slice(heading.end, end).join('\n').match(/[\w$]+/g) ?? [];
+    const symbol = namesInSection.find((name) => names.has(name));
+    if (!symbol) return [];
+    const next = headings.slice(index + 1).find((section) => section.level <= heading.level);
+    // A label introducing the next heading must stay with that heading.
+    const label = next && [next.start - 1, next.start - 2].find((line) => /^\.\. _[^:]+: *$/.test(lines[line - 1] ?? ''));
+    const boundary = label ?? next?.start;
+    const continuation = next && boundary !== undefined && boundary > end + 1
+      ? [snippet(candidate.path, candidate.file, boundary, next.end)] : undefined;
+    return [{ ...candidate, start: heading.start, end: next && !continuation ? next.end : end, symbol, continuation,
+      reason: `Existing documentation section for registered ${symbol}`
+        + (boundary === undefined ? '' : ` · next peer or enclosing section starts at line ${boundary}`) }];
+  }).slice(-2).reverse();
+}
+
+const codeTokens = (text: string) => text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^\p{L}\p{N}]+/u);
+const generalTerms = new Set('must using used value values type types test tests command commands default defaults error'.split(' '));
+const sourceLanguage = /\.(?:py[wi]?|[cm]?[jt]sx?)$/i;
+const mappingDeclaration = /^\s*(?:(?:export|const|let|var|static|readonly|public|private)\s+)*([\w$]+)\s*(?::[^=]+)?=\s*(?:\{|[\w.]+\()/;
+const validationError = /^\s*(?:raise\s+|throw\s+(?:new\s+)?)(?:TypeError|ValueError|RangeError|ValidationError)\s*\(/;
+const typeCheck = /\b(?:isinstance\s*\(|typeof\b|instanceof\b|Array\.isArray\s*\(|Number\.is\w+\s*\()/;
+
+function relatedBehavior(files: ReadonlyMap<string, SourceFile>, implementation: Candidate, query: string): Candidate[] {
+  if (!sourceLanguage.test(implementation.path)) return [];
+  const directory = implementation.path.slice(0, implementation.path.lastIndexOf('/') + 1);
+  const topics = new Set(codeTokens(query).filter((word) => word.length >= 4 && !stopWords.has(word) && !generalTerms.has(word)));
+  const topicList = [...topics];
+  if (!topicList.length) return [];
+  const matches = (text: string) => new Set(codeTokens(text).filter((word) => topics.has(word))).size;
+  const defaults: Candidate[] = [];
+  const validations: Candidate[] = [];
+  for (const [path, file] of files) {
+    if (!path.startsWith(directory) || !sourceLanguage.test(path) || /(?:^|\/)(?:tests?|docs?)\//i.test(path)) continue;
+    const pathScore = matches(path);
+    for (const [index, line] of file.lines.entries()) {
+      const name = mappingDeclaration.exec(line)?.[1] ?? '';
+      const parts = codeTokens(name);
+      if (parts.includes('default') || parts.includes('defaults')) {
+        const nameScore = parts.filter((part) => part.length >= 4 && !generalTerms.has(part)
+          && topicList.some((topic) => topic.startsWith(part) || part.startsWith(topic))).length;
+        const matchesModule = parts.every((part) => generalTerms.has(part)) && matches(path.split('/').at(-1) ?? '') > 0;
+        const end = Math.min(file.lines.length, index + 13);
+        if (nameScore || matchesModule) defaults.push({ path, file, start: index + 1, end,
+          score: nameScore * 3 + pathScore, selected: false, reason: 'Related runtime defaults' });
+      }
+      const errorScore = validationError.test(line) ? matches(line) : 0;
+      if (errorScore) {
+        const start = Math.max(1, index - 12);
+        const checksValueTypes = file.lines.slice(start - 1, index).some((source) => typeCheck.test(source));
+        validations.push({ path, file, start, end: index + 1, score: errorScore * 3 + pathScore + Number(checksValueTypes),
+          selected: false, reason: 'Related validation or type handling' });
+      }
+    }
+  }
+  return [rank(defaults)[0], rank(validations)[0]].filter((hit) => !!hit);
+}
 
 function terms(query: string): string[] {
   return [...new Set((query.toLowerCase().match(/[\p{L}\p{N}_]{2,64}/gu) ?? [])
@@ -368,8 +441,20 @@ export class ContextEngine {
       // Keep a matching sibling ahead of docs or tests for a different candidate module.
       return matches.find((hit) => hit.path.split('/').at(-1)?.toLowerCase().split(/[^\p{L}\p{N}]+/u).includes(implementationStem)) ?? matches[0];
     }).filter((hit) => !!hit);
+    const behavior = this.agentMode && implementation ? relatedBehavior(files, implementation, query) : [];
     if (this.agentMode) {
       const extra: Candidate[] = [];
+      let peerCommand: string | undefined;
+      let placedDocumentation: Candidate | undefined;
+      const documentation = representatives.find((hit) => group(hit.path) === 'docs');
+      if (implementation && documentation && /\b(?:docs?|document(?:ed|ation)?|guide|manual)\b/i.test(query)) {
+        const [placement, peer] = documentedEntryPoints(documentation, implementation);
+        if (placement) {
+          representatives[representatives.indexOf(documentation)] = placement;
+          placedDocumentation = placement;
+        }
+        if (peer) extra.push(peer);
+      }
       for (const hit of representatives) {
         const kind = group(hit.path);
         const nearby = (index: number, reason: string, lines = 13) => {
@@ -380,10 +465,10 @@ export class ContextEngine {
           extra.push({ ...hit, start, end, reason, symbol: undefined });
         };
         if (kind === 'code') {
-          const registration = hit.file.lines.findIndex((line) => /\.(?:add|register|include|mount)(?:_[a-z]+)?\s*\(/i.test(line));
-          nearby(registration, 'Existing registration or entry point');
-          const names = registration < 0 ? [] : hit.file.lines.slice(registration, registration + 8).flatMap((line) => {
-            const match = /\.(?:add|register|include|mount)(?:_[a-z]+)?\s*\(\s*([\w$]+)\s*[,)]/i.exec(line);
+          const registrationLine = hit.file.lines.findIndex((line) => registration.test(line));
+          nearby(registrationLine, 'Existing registration or entry point');
+          const names = registrationLine < 0 ? [] : hit.file.lines.slice(registrationLine, registrationLine + 8).flatMap((line) => {
+            const match = registrationTarget.exec(line);
             return match?.[1] ? [match[1]] : [];
           });
           const handlers = hit.file.lines.flatMap((line, index) =>
@@ -393,21 +478,24 @@ export class ContextEngine {
           let handler = -1;
           if (registered) {
             handler = handlers.filter((index) => index < registered.start - 1 && index >= registered.start - 20).at(-1) ?? registered.start - 1;
-          } else if (registration >= 0 && handlers.length) {
-            handler = handlers.reduce((nearest, index) => Math.abs(index - registration) < Math.abs(nearest - registration) ? index : nearest, handlers[0]!);
+          } else if (registrationLine >= 0 && handlers.length) {
+            handler = handlers.reduce((nearest, index) => Math.abs(index - registrationLine) < Math.abs(nearest - registrationLine) ? index : nearest, handlers[0]!);
           } else {
             handler = handlers.find((index) => index + 1 >= hit.start) ?? handlers.at(-1) ?? -1;
           }
+          peerCommand = commandDecorator.exec(hit.file.lines[handler] ?? '')?.[1];
           nearby(handler, 'Existing handler definition', 22);
         } else if (kind === 'test') {
           const tests = hit.file.lines.flatMap((line, index) => /^(?:async\s+)?def test_|^\s*(?:test|it|describe)\s*\(/.test(line) ? [index] : []);
           const test = tests.find((index) => index + 1 >= hit.start) ?? tests.at(-1) ?? -1;
           nearby(test, 'Existing test definition');
           if (/\b(?:cli|commands?)\b/i.test(query)) {
-            const invocation = hit.file.lines.findIndex((line) => /\b\w+\.invoke\(\s*[\w.]+\s*,\s*\[/.test(line));
-            nearby(invocation, 'Existing test invocation: command entry point, arguments and assertions', 12);
+            const peer = peerCommand ? hit.file.lines.findIndex((line) => commandInvocation.exec(line)?.[1] === peerCommand) : -1;
+            const invocation = peer >= 0 ? peer : hit.file.lines.findIndex((line) => commandInvocation.test(line));
+            nearby(invocation, peer >= 0 ? 'Existing test invocation for the registered handler'
+              : 'Existing test invocation: command entry point, arguments and assertions', 12);
           }
-        } else {
+        } else if (hit !== placedDocumentation) {
           const headings = hit.file.lines.flatMap((line, index) => index > 2 && (
             /^#{2,4}\s+/.test(line) || (/^[-~=^]{3,}\s*$/.test(line) && !!hit.file.lines[index - 1]?.trim())
           ) ? [index] : []);
@@ -417,13 +505,16 @@ export class ContextEngine {
         }
       }
       // Keep implementation, test, and documentation landmarks ahead of secondary matches.
-      ranked.unshift(...extra);
+      ranked.unshift(...extra, ...behavior);
     }
     const fresh = [...new Set([...representatives, ...ranked])].filter((hit) => !(this.#seen.get(hit.path) ?? [])
       .some((sent) => sent.start <= hit.end && sent.end >= hit.start));
-    const top = fresh.slice(0, this.agentMode ? 9 : 12);
-    const bounded = await this.#withPythonBoundaries(top.map(({ path, file, start, end, reason, symbol }) => ({ file, maxLines: end - start + 1,
-      includeSetup: reason === 'Existing handler definition', excerpt: { ...snippet(path, file, start, end), reason, symbol } })), signal);
+    const top = fresh.slice(0, this.agentMode ? 9 + behavior.length : 12);
+    const bounded = await this.#withPythonBoundaries<Snippet & { reason: string; symbol?: string }>(top.map((hit) => {
+      const { path, file, start, end, reason, symbol, continuation } = hit;
+      return { file, maxLines: behavior.includes(hit) ? 0 : end - start + 1,
+        includeSetup: reason === 'Existing handler definition', excerpt: { ...snippet(path, file, start, end), reason, symbol, continuation } };
+    }), signal);
     const payload = bounded.flatMap((item, index) => {
       const boundary = item.pythonBoundary;
       if (!boundary?.setup?.length) return [item];

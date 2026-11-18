@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { applyHunks, createHunks, fingerprint } from './quickPatch';
 import type { BaseSelection, Hunk } from './quickPatch';
 import { maxFileBytes } from './repository';
+import { rstHeadings } from './rst';
 import { VantaError } from './trueforge';
 
 export const stageAgentTool = 'stage_file_edit';
@@ -22,26 +23,13 @@ export interface ApprovedFile { base: BaseSelection; after: string; ids: number[
 export interface AgentReceipt extends ReviewReference { digest: string; files: string[] }
 
 function rstSections(source: string) {
-  const lines = source.split(/\r?\n/);
-  const styles: string[] = [];
   const parents: { key: string; level: number }[] = [];
   const sections = new Map<string, { title: string; parent?: string; line: number } | undefined>();
-  const adornment = (line: string | undefined) => /^([=~^+*"'`:#\-])\1{2,}$/.test(line?.trimEnd() ?? '') ? line!.trimEnd()[0] : undefined;
-  for (let index = 0; index < lines.length - 1; index++) {
-    const title = lines[index]?.trimEnd();
-    const underline = adornment(lines[index + 1]);
-    if (!title || /^\s|^\.\./.test(title) || !/[\p{L}\p{N}]/u.test(title) || !underline) continue;
-    const overline = adornment(lines[index - 1]) === underline;
-    if (lines[index - (overline ? 2 : 1)]?.trim()) continue;
-    if (lines[index + 1]!.trimEnd().length < title.length) continue;
-    const style = underline + (overline ? 'overline' : '');
-    if (!styles.includes(style)) styles.push(style);
-    const level = styles.indexOf(style);
+  for (const { title, style, level, end } of rstHeadings(source.split(/\r?\n/))) {
     const key = style + ' ' + title;
     while ((parents.at(-1)?.level ?? -1) >= level) parents.pop();
-    sections.set(key, sections.has(key) ? undefined : { title, parent: parents.at(-1)?.key, line: index + 1 });
+    sections.set(key, sections.has(key) ? undefined : { title, parent: parents.at(-1)?.key, line: end - 1 });
     parents.push({ key, level });
-    index++;
   }
   return sections;
 }

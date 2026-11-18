@@ -62,21 +62,21 @@ test(`live Agent Mode discovers and verifies three related files in ${flask ? 'p
   });
   const cancel = () => { void session.cancel(); };
   test.signal.addEventListener('abort', cancel, { once: true });
-  let reviewStarted = false;
-  let approvalStarted = false;
+  const reviews = new Set<string>();
+  const verifications = new Set<string>();
   let driverFailure: unknown;
   const drive = session.listen(() => {
     const { review, approval } = session.state;
-    if (review?.files && !reviewStarted) {
-      reviewStarted = true;
+    if (review?.files && !reviews.has(review.id)) {
+      reviews.add(review.id);
       void (async () => {
         assert.equal(git('status', '--porcelain'), '');
         for (const hunk of review.hunks) await session.reviewHunk(review.id, hunk.id, 'accepted');
         await session.finishReview(review.id, true);
       })().catch((error: unknown) => { driverFailure = error; cancel(); });
     }
-    if (approval?.canAllow && !approvalStarted) {
-      approvalStarted = true;
+    if (approval?.canAllow && !verifications.has(approval.id)) {
+      verifications.add(approval.id);
       void session.decide(approval.id, true).catch((error: unknown) => { driverFailure = error; cancel(); });
     }
   });
@@ -95,9 +95,12 @@ test(`live Agent Mode discovers and verifies three related files in ${flask ? 'p
       ? ['docs/cli.rst', 'src/flask/cli.py', 'tests/test_cli.py']
       : ['docs/invoices.md', 'tests/test_totals.py', 'totals.py']);
     assert.equal(git('status', '--porcelain'), '');
-    assert.ok(state.activity.some((item) => item.detail === 'call_tool'));
-    assert.equal(events.filter((event) => event === 'tool.approval_required').length, 2);
-    assert.equal(events.filter((event) => event === 'user.tool_approval').length, 2);
+    const discovered = new Set(state.context?.flatMap(({ hits }) => hits.filter(({ selected }) => selected).map(({ path }) => path)));
+    assert.ok(applied.every(({ base }) => discovered.has(base.path)), 'each applied file was discovered through repository context');
+    assert.equal(verifications.size, reviews.size);
+    assert.ok(reviews.size === 1 || reviews.size === 2);
+    assert.equal(events.filter((event) => event === 'tool.approval_required').length, 2 * reviews.size);
+    assert.equal(events.filter((event) => event === 'user.tool_approval').length, 2 * reviews.size);
     assert.ok(events.includes('turn.done'));
     await session.undoAgent();
     assert.equal(applied.length, 0);

@@ -65,8 +65,8 @@ export async function run() {
   });
   const quick: QuickEdit = new QuickEdit(session, () => 8000);
   const virtual = vscode.workspace.registerTextDocumentContentProvider(quickEditScheme, quick);
-  let reviewing = false;
-  let verifying = false;
+  const reviews = new Set<string>();
+  const verifications = new Set<string>();
   let driverError: unknown;
   let stopLatency: number | undefined;
   let stop: Promise<void> | undefined;
@@ -81,8 +81,8 @@ export async function run() {
       stop = session.cancel();
       stopLatency = performance.now() - started;
     }
-    if (review && !reviewing) {
-      reviewing = true;
+    if (review && !reviews.has(review.id)) {
+      reviews.add(review.id);
       void (async () => {
         if (task !== 'B') {
           assert.ok(patch);
@@ -101,8 +101,8 @@ export async function run() {
         await session.finishReview(review.id, true);
       })().catch((error: unknown) => { driverError = error; void session.cancel(); });
     }
-    if (approval?.canAllow && !verifying) {
-      verifying = true;
+    if (approval?.canAllow && !verifications.has(approval.id)) {
+      verifications.add(approval.id);
       void session.decide(approval.id, true).catch((error: unknown) => { driverError = error; void session.cancel(); });
     }
   });

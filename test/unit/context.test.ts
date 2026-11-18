@@ -124,6 +124,107 @@ test('Agent Mode bundle includes nearby implementation, test, and documentation 
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
 
+test('Agent Mode finds tests and documentation for registered commands and preserves the next section label', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vanta-docs-context-'));
+  const signal = new AbortController().signal;
+  try {
+    await mkdir(join(root, 'src'));
+    await mkdir(join(root, 'docs'));
+    await mkdir(join(root, 'tests'));
+    await writeFile(join(root, 'src/console.py'), [
+      '@registry.command("open")', 'def open_console():', '    pass', '',
+      '@registry.command("status")', 'def check_console():', '    pass', '',
+      'registry.register(open_console)', 'registry.register(check_console)',
+    ].join('\n'));
+    await writeFile(join(root, 'tests/test_console.py'), [
+      'def test_other_command(runner):', '    runner.invoke(console, ["help"])',
+      ...Array.from({ length: 30 }, () => ''),
+      'def test_status(runner):', '    result = runner.invoke(console, ["status"])', '    assert result.exit_code == 0',
+    ].join('\n'));
+    await writeFile(join(root, 'docs/console.rst'), [
+      'Console guide', '=============', '',
+      'Open the console', '----------------', '', 'Use :func:`open <console.open_console>`. ::', '', '    $ console open', '',
+      'Window options', '~~~~~~~~~~~~~~', '', 'These options belong to the open command.', '',
+      'Check status', '------------', '', 'Use :func:`status <console.check_console>`. ::', '', '    $ console status', '',
+      '.. _env:', '', 'Environment', '-----------', '', 'Console profiling configuration is controlled by an environment variable.',
+    ].join('\n'));
+    const repo = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
+    const context = new ContextEngine(repo, 8000, () => undefined, true);
+    const result = await context.bundle('Add a console profiling command and document it alongside the existing commands', signal);
+    const docs = result.items.filter(({ reason }) => reason.startsWith('Existing documentation section for registered '));
+    assert.deepEqual(docs.map(({ symbol }) => symbol), ['check_console', 'open_console']);
+    assert.match(docs[0]!.text, /\$ console status\n\n\.\. _env:\n\nEnvironment/);
+    assert.match(docs[0]!.reason, /starts at line 23/);
+    assert.match(docs[1]!.text, /\$ console open/);
+    assert.match(docs[1]!.continuation?.[0]?.text ?? '', /^Check status/);
+    assert.match(result.items.find(({ reason }) => reason === 'Existing test invocation for the registered handler')?.text ?? '',
+      /runner\.invoke\(console, \["status"\]\)/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('Agent Mode surfaces default values and encoder type handling for Python serialization', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vanta-serialization-context-'));
+  const signal = new AbortController().signal;
+  try {
+    await mkdir(join(root, 'src', 'ledger'), { recursive: true });
+    await writeFile(join(root, 'src/ledger/cli.py'), 'def show_ledger_cli():\n    """Entry point for ledger settings export."""\n');
+    await writeFile(join(root, 'src/ledger/options.py'), 'default_settings = {\n    "STARTING_BALANCE": Decimal("5.00"),\n}\n');
+    await writeFile(join(root, 'src/ledger/arg_parser.py'), 'raise TypeError("JSON arguments are mutually exclusive")\n');
+    await writeFile(join(root, 'src/ledger/encoder.py'), [
+      'def encode_value(value):',
+      '    if isinstance(value, datetime):',
+      '        return value.isoformat()',
+      '    raise TypeError("Value is not JSON serializable")',
+    ].join('\n'));
+    const repo = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
+    const reports: ContextReport[] = [];
+    const select = () => new ContextEngine(repo, 8000, (report) => reports.push(report), true);
+    const serialization = await select().bundle('Extend the ledger CLI to export the loaded settings as JSON', signal);
+    const defaults = serialization.items.find(({ reason }) => reason === 'Related runtime defaults');
+    assert.equal(defaults?.path, 'src/ledger/options.py');
+    assert.match(defaults!.text, /"STARTING_BALANCE": Decimal/);
+    const encoder = serialization.items.find(({ reason }) => reason === 'Related validation or type handling');
+    assert.equal(encoder?.path, 'src/ledger/encoder.py');
+    assert.match(encoder!.text, /isinstance\(value, datetime\)[\s\S]*raise TypeError/);
+    const ordinary = await select().bundle('Rename the ledger CLI status command', signal);
+    assert.ok(!ordinary.items.some(({ reason }) => reason === 'Related runtime defaults' || reason === 'Related validation or type handling'));
+    assert.ok(reports.every((report) => report.estimatedTokens <= report.budget));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('Agent Mode uses the same relevance rules for defaults and validation in a TypeScript API', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vanta-api-context-'));
+  const signal = new AbortController().signal;
+  try {
+    for (const path of ['src/scheduling', 'src/billing', 'docs', 'tests']) await mkdir(join(root, path), { recursive: true });
+    await writeFile(join(root, 'src/scheduling/api.ts'), [
+      '// Scheduling API: booking capacity and cancellation policy.',
+      "import { enforceCapacity } from './policy';",
+      'export function reserveCapacity(capacity: number) { return enforceCapacity(capacity); }',
+    ].join('\n'));
+    await writeFile(join(root, 'src/scheduling/options.ts'), 'export const defaultBookingOptions = {\n  capacity: 4,\n};\n');
+    await writeFile(join(root, 'src/scheduling/policy.ts'), [
+      'export function enforceCapacity(capacity: number) {',
+      '  if (!Number.isInteger(capacity) || capacity < 1) {',
+      '    throw new RangeError("Booking capacity must be a positive integer");',
+      '  }',
+      '  return capacity;',
+      '}',
+    ].join('\n'));
+    await writeFile(join(root, 'src/billing/policy.ts'), 'throw new RangeError("Billing capacity is exceeded");\n');
+    await writeFile(join(root, 'tests/test_api.ts'), 'test("scheduling API booking capacity", () => {});\n');
+    await writeFile(join(root, 'docs/api.md'), '# Scheduling API\n\n## Booking capacity\n\nThe default capacity is four.\n');
+    const repo = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
+    const request = 'Update scheduling API booking capacity validation and document the cancellation policy';
+    const result = await new ContextEngine(repo, 8000, () => undefined, true).bundle(request, signal);
+    assert.deepEqual(result.items.slice(0, 3).map(({ path }) => path), ['src/scheduling/api.ts', 'tests/test_api.ts', 'docs/api.md']);
+    assert.match(result.items.find(({ reason }) => reason === 'Related runtime defaults')?.text ?? '', /capacity: 4/);
+    const guard = result.items.find(({ reason }) => reason === 'Related validation or type handling');
+    assert.equal(guard?.path, 'src/scheduling/policy.ts');
+    assert.match(guard!.text, /Number\.isInteger\(capacity\)/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('Agent Mode reserves source lines for actual Python boundaries across a clipped function', { skip: !process.env.VANTA_TEST_PYTHON }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'vanta-context-boundaries-'));
   const path = 'router.py';
