@@ -16,9 +16,21 @@ The desktop extension creates sessions on local TrueForge 0.185.1 through SDK 0.
 
 Quick Edit captures the editor selection and opens a native diff. Agent Mode stores proposals until the user reviews the exact hunks. An independent approval permits pytest in an isolated snapshot with the accepted edits. After verification and terminal success, the host applies to editor buffers and leaves saving to the user. Undo checks the recorded source state. This costs a second approval but keeps arbitrary command execution and automatic disk writes out of the workflow.
 
+### TrueForge Integration — Deferred Tool Loading
+
+VANTA uses TrueForge's deferred tool loading to reduce upfront tool-schema context while retaining access to additional repository information.
+
+In Quick Edit, frequently used editing and review tools are preloaded, while TrueForge loads the full definitions of `read_file` and `find_symbol` on demand.
+
+A verified live Quick Edit session recorded `list_tools` → `get_tool_info(read_file)` → `call_tool(read_file)`, successfully retrieving source code from `src/flask/helpers.py`.
+
+Agent Mode preloads `get_context_bundle` and `read_workspace_ranges` because repository-wide tasks typically require immediate context discovery.
+
+This design reduces the initially exposed tool definitions without sacrificing access to missing context.
+
 ## How context is selected
 
-VANTA ranks candidate files with task terms, declarations, filename matches and related tests or docs. It uses explicit references when supplied, deduplicates ranges, and explains each selection. Agent Mode defaults to an estimated 8,000 source tokens and eight repository calls. The verified Task B first bundle used 3,256 estimated tokens. The initial bundle is preloaded, while targeted reads and symbol tools can load on demand. A live Quick Edit used TrueForge's deferred reader to resolve a missing source range.
+VANTA ranks candidate files with task terms, declarations, filename matches and related tests or docs. It uses explicit references when supplied, deduplicates ranges, and explains each selection. Agent Mode defaults to an estimated 8,000 source tokens and eight repository calls. The verified Task B first bundle used 3,256 estimated tokens.
 
 ## Model setup
 
