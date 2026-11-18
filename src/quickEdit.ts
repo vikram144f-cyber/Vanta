@@ -110,15 +110,22 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
         if (document.getText() !== expected) throw new VantaError('The buffer changed during apply. Inspect it in the editor and use Undo if needed.');
         const version = document.version;
         this.#undo = async () => {
-          const editor = await vscode.window.showTextDocument(document, { preview: false });
           const timeout = AbortSignal.timeout(4500);
+          if (!scope.isAvailable() || await disk.location(path, timeout) !== absolute) {
+            throw new VantaError('Quick Edit cannot be undone because the original workspace or file changed.');
+          }
+          const reopened = document.isClosed;
+          const current = reopened ? await vscode.workspace.openTextDocument(document.uri) : document;
+          const currentVersion = current.version;
+          const editor = await vscode.window.showTextDocument(current, { preview: false });
           const actualDisk = await disk.diskText(path, timeout);
-          if (!scope.isAvailable() || document.isClosed || document.version !== version || document.getText() !== expected
+          if (!scope.isAvailable() || current.isClosed || document.version !== version || current.version !== currentVersion || current.getText() !== expected
+            || (reopened && (current.isDirty || actualDisk !== expected))
             || (actualDisk !== originalDisk && actualDisk !== expected)) {
             throw new VantaError('Quick Edit cannot be undone because the source changed. Review the buffer in VS Code.');
           }
           if (!await editor.edit((edit) => {
-            edit.replace(new vscode.Range(new vscode.Position(0, 0), document.positionAt(expected.length)), base.text);
+            edit.replace(new vscode.Range(new vscode.Position(0, 0), current.positionAt(expected.length)), base.text);
           }, { undoStopBefore: true, undoStopAfter: true })) throw new VantaError('VS Code rejected Quick Edit undo.');
         };
       } };

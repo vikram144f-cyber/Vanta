@@ -20,13 +20,13 @@ const binding = { call: 'call', turn: 'turn', session: 'session', workspace: 'wo
 
 test('a new reStructuredText section preserves existing subsection parents', () => {
   const path = 'docs/guide.rst';
-  const original = 'Guide\n=====\n\nUsage\n-----\n\nExample text.\n\nOptions\n~~~~~~~\n\nExisting options.\n\nNext section\n------------\n';
+  const original = 'Guide\n=====\n\nUsage\n-----\n\nExample text.\n\nOptions\n~~~~~~~\n\nExisting options.\n\nNext section\n------------\n\nOptions\n~~~~~~~\n\nNext options.\n';
   const newSection = 'New feature\n-----------\n\nDocumentation text.\n\n';
   const patch = new AgentPatch();
   const insert = (old: string) => patch.stage(base(path, original), {
     path, summary: 'Document a feature', edits: [{ old, replacement: newSection + old }],
   });
-  assert.throws(() => insert('Options\n~~~~~~~'), /would contain the existing section "Options"/);
+  assert.throws(() => insert('Options\n~~~~~~~\n\nExisting options.'), /would contain the existing section "Options"/);
   assert.equal(patch.reference.revision, 0);
   assert.equal(insert('Next section\n------------').hunks, 1);
 });
@@ -154,6 +154,7 @@ test('Agent Mode rejects a new Python declaration inside an existing body and ca
   const verify = (staged: Parameters<typeof validatePythonStaging>[1]) => validatePythonStaging(python!, staged, new AbortController().signal);
   const addition = 'def added():\n    run()\n\n';
   await assert.rejects(patch.stageValidated(file, revision('    finish()\n', `\n${addition}    finish()\n`), verify), /original line 4.*after line 4/);
+  await assert.rejects(patch.stageValidated(file, revision('    start()\n', `    changed()\n\n${addition.trimEnd()}\n`), verify), /splits an existing definition at original line 3/);
   assert.equal(patch.reference.revision, 0);
   await patch.stageValidated(file, revision('def next_function():', `${addition}def next_function():`), verify);
   assert.equal(patch.reference.revision, 1);
@@ -177,11 +178,13 @@ test('Ruff staging returns new undefined names, preserves baseline findings, and
   assert.equal(patch.reference.revision, 1);
 });
 
-for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject and revise', 'revision failure', 'revision without proposal', 'revision cancellation', 'rejected staging loop', 'invalid syntax', 'deny', 'cancel', 'failed test', 'correct failed test', 'correction fails', 'interrupted', 'forged'] as const) {
+for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject and revise', 'revision failure', 'revision without proposal', 'revision cancellation', 'rejected staging loop', 'invalid syntax', 'invalid selected hunks', 'deny', 'cancel', 'failed test', 'correct failed test', 'correction fails', 'interrupted', 'forged'] as const) {
   test(`Agent Mode patch and verification gates · ${verdict}`, { skip: !python, timeout: 15_000 }, async () => {
     assert.ok(python);
     const path = 'test_fixture.py';
-    const source = 'def test_fixture():\n    assert True\n\n\ndef test_other():\n    assert 2 == 2\n';
+    const invalidSelection = verdict === 'invalid selected hunks';
+    const source = 'def test_fixture():\n    assert True\n\n\ndef test_other():\n    assert 2 == 2\n'
+      + (invalidSelection ? '\n\ndata = (\n    1,\n    2,\n)\n' : '');
     const root = await mkdtemp(join(tmpdir(), 'vanta-agent-gates-'));
     await writeFile(join(root, path), source);
     const repo = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
@@ -224,7 +227,7 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
           yield { type: 'turn.created', id: 'turn', turnId: 'turn', previousTurnId: null, createdAt, threadId: null, state: { status: 'running' } };
           if (verdict === 'fallback' && inputs.length === 1) {
             yield { type: 'turn.done', id: 'failure', createdAt, threadId: null,
-              state: { status: 'error', message: '[Model Error] Request failed (503): unavailable', completedAt: createdAt } };
+              state: { status: 'error', message: '[Model Error] Request failed (503): Maintenance in availability zone 403.', completedAt: createdAt } };
             return;
           }
           if (cancelNext) {
@@ -252,6 +255,7 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
           }
           const edits = [{ old: '    assert True', replacement: verdict === 'invalid syntax' && inputs.length === 1 ? 'assert True\n    return'
             : (verdict === 'failed test' || autoCorrect) && inputs.length === 1 ? '    assert False' : '    assert 1 == 1' }];
+          if (invalidSelection) edits.push({ old: 'data = (', replacement: 'data = [' }, { old: '\n)\n', replacement: '\n]\n' });
           if (verdict === 'reject and revise' && inputs.length === 1) edits.push({ old: '    assert 2 == 2', replacement: '    assert False' });
           const { proposalId, revision } = await tools.stage({ path, summary: 'Add an assertion', edits }) as typeof reference;
           reference = { proposalId, revision };
@@ -301,7 +305,8 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
       agentWorkspace: async () => ({ repository: repo, capture: async () => { captures++; return base(path, source); }, preview: async () => undefined,
         apply: async (files, _signal, begin) => {
           begin();
-          assert.equal(files[0]?.after, source.replace('True', '1 == 1'));
+          const expected = source.replace('True', '1 == 1');
+          assert.equal(files[0]?.after, invalidSelection ? expected.replace('data = (', 'data = [').replace('\n)\n', '\n]\n') : expected);
           writes++;
           return async () => { writes--; };
         } }),
@@ -348,6 +353,19 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
         assert.equal(approved.length, 0);
         assert.equal(session.state.verification, undefined);
       } else assert.equal(shown.blocked, undefined);
+      if (invalidSelection) {
+        assert.equal(shown.hunks.length, 3);
+        for (const hunk of shown.hunks) await session.reviewHunk(shown.id, hunk.id, 'accepted');
+        const closing = shown.hunks.at(-1)!;
+        await session.reviewHunk(shown.id, closing.id, 'rejected');
+        await session.finishReview(shown.id, true);
+        assert.match(session.state.error ?? '', /selected hunks failed Python syntax validation/);
+        assert.equal(session.state.review?.id, shown.id);
+        assert.deepEqual(approved, []);
+        assert.equal(writes, 0);
+        assert.throws(() => tools.review(reference), /local patch approval/);
+        await session.reviewHunk(shown.id, closing.id, 'accepted');
+      }
       if (verdict === 'deny review' || verdict === 'reject and revise' || verdict === 'invalid syntax'
         || verdict === 'revision failure' || verdict === 'revision without proposal' || verdict === 'revision cancellation') {
         if (verdict === 'reject and revise') {
@@ -430,7 +448,7 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
         return;
       }
       await run;
-      const applies = verdict === 'allow' || verdict === 'deferred' || verdict === 'fallback';
+      const applies = verdict === 'allow' || verdict === 'deferred' || verdict === 'fallback' || invalidSelection;
       assert.equal(writes, applies ? 1 : 0);
       assert.deepEqual(approved, verdict === 'cancel' ? ['allow'] : ['allow', verdict === 'deny' ? 'deny' : 'allow']);
       if (applies) assert.equal(session.state.verification?.status, 'passed');

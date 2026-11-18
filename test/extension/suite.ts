@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
 import * as vscode from 'vscode';
 import { writeFile, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -49,6 +50,14 @@ export async function run() {
   assert.equal(buffer.getText(), captured.text);
   const folder = vscode.workspace.workspaceFolders?.[0];
   assert.ok(folder);
+  const evict = async (document: vscode.TextDocument, prefix: string) => {
+    for (let i = 0; i < 64 && !document.isClosed; i++) {
+      const uri = vscode.Uri.joinPath(folder.uri, `${prefix}-${i}.txt`);
+      await writeFile(uri.fsPath, 'eviction fixture\r\n');
+      await vscode.workspace.openTextDocument(uri);
+    }
+    assert.ok(document.isClosed, `Expected VS Code to evict ${prefix} document.`);
+  };
   const quickFile = join(folder.uri.fsPath, 'quick-saved.txt');
   const quickOriginal = 'original\r\nend\r\n';
   const quickAfter = 'reviewed\r\nend\r\n';
@@ -64,20 +73,23 @@ export async function run() {
     assert.equal(await readFile(quickFile, 'utf8'), quickOriginal);
     assert.equal(await quickDoc.save(), true);
     assert.equal(await readFile(quickFile, 'utf8'), quickAfter);
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
     await vscode.window.showTextDocument(buffer);
+    await evict(quickDoc, 'quick-undo');
     await quick.undo();
-    assert.equal(quickDoc.getText(), quickOriginal);
+    const reopened = await vscode.workspace.openTextDocument(quickDoc.uri);
+    assert.equal(reopened.getText(), quickOriginal);
     assert.equal(await readFile(quickFile, 'utf8'), quickAfter);
-    assert.equal(await quickDoc.save(), true);
+    assert.equal(await reopened.save(), true);
     assert.equal(await readFile(quickFile, 'utf8'), quickOriginal);
-    const nextEditor = await vscode.window.showTextDocument(quickDoc);
+    const nextEditor = await vscode.window.showTextDocument(reopened);
     nextEditor.selection = new vscode.Selection(0, 0, 1, 0);
     const next = await quick.capture(nextEditor);
     await next.apply(createHunks(next.base, 'reviewed\r\n'), fingerprint(quickAfter), AbortSignal.timeout(5000), () => undefined);
     assert.equal(await nextEditor.edit((edit) => edit.insert(new vscode.Position(1, 0), 'user edit\r\n')), true);
     await quick.undo();
-    assert.equal(quickDoc.getText(), 'reviewed\r\nuser edit\r\nend\r\n');
-    console.log('Quick Edit targeted undo restored a saved file from a different active editor and preserved later edits.');
+    assert.equal(reopened.getText(), 'reviewed\r\nuser edit\r\nend\r\n');
+    console.log('Quick Edit targeted Undo reopened an evicted saved file and preserved later edits.');
   } finally { quick.dispose(); }
   const repo = await editorAgent(async () => undefined);
   assert.ok(repo, 'Expected a trusted local workspace');
@@ -88,24 +100,24 @@ export async function run() {
   const approved = await Promise.all(paths.map(async (path) => ({ base: await repo.capture(path, captureDeadline), after: 'reviewed\r\n', ids: [1] })));
   const staged = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, paths[0]!));
   // Exceed VS Code's document-reference cache to simulate expiry without waiting minutes.
-  for (let i = 0; i < 64 && !staged.isClosed; i++) {
-    const uri = vscode.Uri.joinPath(folder.uri, `background-${i}.txt`);
-    await writeFile(uri.fsPath, source);
-    await vscode.workspace.openTextDocument(uri);
-  }
-  assert.ok(staged.isClosed, 'Expected VS Code to release the staged document during review.');
+  await evict(staged, 'agent-staged');
   const deadline = AbortSignal.timeout(15_000);
   let commits = 0;
   const apply = () => repo.apply(approved, deadline, () => { commits++; });
   const revert = await apply();
   assert.equal(commits, 1);
-  const target = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, paths[0]!));
+  const applied = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, paths[0]!));
   for (const path of paths) {
-    assert.equal((await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, path))).getText(), 'reviewed\r\n');
+    const document: vscode.TextDocument = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, path));
+    assert.equal(document.getText(), 'reviewed\r\n');
     assert.equal(await readFile(join(folder.uri.fsPath, path), 'utf8'), source);
+    assert.equal(await document.save(), true);
   }
+  await evict(applied, 'agent-undo');
   await revert();
+  const target = await vscode.workspace.openTextDocument(applied.uri);
   assert.equal(target.getText(), source);
+  assert.equal(await target.save(), true);
   const dirty = new vscode.WorkspaceEdit();
   dirty.insert(target.uri, new vscode.Position(0, 0), 'user edit\r\n');
   assert.equal(await vscode.workspace.applyEdit(dirty), true);
@@ -123,6 +135,20 @@ export async function run() {
   assert.equal(await readFile(join(folder.uri.fsPath, changed), 'utf8'), 'changed on disk\r\n');
   assert.equal(commits, 1);
   assert.match(target.getText(), /^user edit/);
-  console.log('Agent Mode applied and undid three CRLF buffers after VS Code released a staged document, and rejected dirty, changed and deleted targets.');
+  const latePaths = ['late-disk-a.txt', 'late-disk-b.txt'];
+  const lateSignal = AbortSignal.timeout(15_000);
+  const lateEdits = await Promise.all(latePaths.map(async (path) => {
+    await writeFile(join(folder.uri.fsPath, path), source);
+    return { base: await repo.capture(path, lateSignal), after: 'reviewed\r\n', ids: [1] };
+  }));
+  await assert.rejects(repo.apply(lateEdits, lateSignal, () => {
+    writeFileSync(join(folder.uri.fsPath, latePaths[0]!), 'external change\r\n');
+  }), /changed on disk during the edit/);
+  assert.equal(await readFile(join(folder.uri.fsPath, latePaths[0]!), 'utf8'), 'external change\r\n');
+  for (const path of latePaths) {
+    const current = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, path));
+    assert.notEqual(current.getText(), 'reviewed\r\n');
+  }
+  console.log('Agent Mode undid saved files after document eviction and recovered matching buffers after a late disk change.');
   console.log('VANTA activated and its commands registered in the Windows Extension Host.');
 }

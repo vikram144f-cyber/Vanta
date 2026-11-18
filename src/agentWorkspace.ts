@@ -19,14 +19,18 @@ export interface BatchFile {
 
 export async function applyBatch<T extends BatchFile>(files: readonly T[], write: (files: readonly T[], undo: boolean) => PromiseLike<boolean>) {
   if (files.some((file) => file.current() !== file.before)) throw new VantaError('A target changed during final preflight. Start a new Agent Mode request.');
+  let failure: string | undefined;
   try {
     if (await write(files, false) && files.every((file) => file.current() === file.after)) return;
-  } catch { /* Inspect the buffers before attempting recovery. */ }
+  } catch (error) {
+    if (error instanceof VantaError) failure = error.message;
+  }
   const recoverable = files.filter((file) => file.current() === file.after);
   if (recoverable.length) {
     try { await write(recoverable, true); } catch { /* Report every file requiring manual recovery. */ }
   }
   const changed = files.filter((file) => file.current() !== file.before).map((file) => file.path);
-  throw new VantaError(changed.length ? `Apply was interrupted. Inspect these buffers and recover any remaining changes manually: ${changed.join(', ')}.`
-    : 'VS Code could not apply the batch. The target buffers match their original contents.');
+  const recovery = changed.length ? `Apply was interrupted. Inspect these buffers and recover any remaining changes manually: ${changed.join(', ')}.`
+    : 'VS Code could not apply the batch. The target buffers match their original contents.';
+  throw new VantaError(failure ? `${failure} ${recovery}` : recovery);
 }

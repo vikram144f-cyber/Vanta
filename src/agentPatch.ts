@@ -23,28 +23,50 @@ export interface ApprovedFile { base: BaseSelection; after: string; ids: number[
 export interface AgentReceipt extends ReviewReference { digest: string; files: string[] }
 
 function rstSections(source: string) {
-  const parents: { key: string; level: number }[] = [];
-  const sections = new Map<string, { title: string; parent?: string; line: number } | undefined>();
-  for (const { title, style, level, end } of rstHeadings(source.split(/\r?\n/))) {
-    const key = style + ' ' + title;
-    while ((parents.at(-1)?.level ?? -1) >= level) parents.pop();
-    sections.set(key, sections.has(key) ? undefined : { title, parent: parents.at(-1)?.key, line: end - 1 });
-    parents.push({ key, level });
-  }
-  return sections;
+  const headings = rstHeadings(source.split(/\r?\n/));
+  const parents: typeof headings = [];
+  return headings.map((heading) => {
+    while ((parents.at(-1)?.level ?? -1) >= heading.level) parents.pop();
+    const parent = parents.at(-1)?.start;
+    parents.push(heading);
+    return { ...heading, parent };
+  });
 }
 
-function assertRstSectionPlacement(path: string, before: string, after: string) {
-  if (!path.toLowerCase().endsWith('.rst')) return;
-  const original = rstSections(before);
-  const proposed = rstSections(after);
-  for (const [key, heading] of original) {
-    const next = proposed.get(key);
-    // An inserted section should not adopt a heading carried over from another section.
-    if (!heading || !next?.parent || next.parent === heading.parent || original.has(next.parent)
-      || (heading.parent && !proposed.has(heading.parent))) continue;
-    const parent = proposed.get(next.parent);
-    if (parent) throw new VantaError(`The new documentation section at proposed line ${parent.line} would contain the existing section "${heading.title}" (line ${heading.line}). Insert the new section at a complete peer-section boundary so existing subsections keep their parent.`);
+function retainedLines(before: string, hunks: readonly Hunk[]) {
+  const lines = new Map<number, number>();
+  const breaks = (text: string) => text.split('\n').length - 1;
+  let original = 1;
+  let proposed = 1;
+  let offset = 0;
+  const retain = (count: number) => {
+    for (let i = 0; i < count; i++) lines.set(original++, proposed++);
+  };
+  for (const { start, end, replacement } of hunks) {
+    retain(breaks(before.slice(offset, start)));
+    original += breaks(before.slice(start, end));
+    proposed += breaks(replacement);
+    offset = end;
+  }
+  if (offset < before.length) retain(breaks(before.slice(offset)) + 1);
+  return lines;
+}
+
+function assertRstSectionPlacement(base: BaseSelection, hunks: readonly Hunk[], after: string) {
+  if (!base.path.toLowerCase().endsWith('.rst')) return;
+  const original = rstSections(base.text);
+  const proposed = new Map(rstSections(after).map((heading) => [heading.start, heading]));
+  const lines = retainedLines(base.text, hunks);
+  const carried = new Map<number, NonNullable<ReturnType<typeof proposed.get>>>();
+  for (const heading of original) {
+    const next = proposed.get(lines.get(heading.start) ?? -1);
+    if (next?.title === heading.title && next.style === heading.style && lines.get(heading.end) === next.end) carried.set(heading.start, next);
+  }
+  const existing = new Set([...carried.values()].map(({ start }) => start));
+  for (const heading of original) {
+    const parent = carried.get(heading.start)?.parent;
+    if (parent === undefined || existing.has(parent) || (heading.parent !== undefined && !carried.has(heading.parent))) continue;
+    throw new VantaError(`The new documentation section at proposed line ${parent} would contain the existing section "${heading.title}" (line ${heading.end - 1}). Insert the new section at a complete peer-section boundary so existing subsections keep their parent.`);
   }
 }
 
@@ -86,8 +108,8 @@ export class AgentPatch {
     }).sort((a, b) => a.start - b.start);
     const after = applyHunks(base, edits);
     if (Buffer.byteLength(after) > maxFileBytes) throw new VantaError('The proposed file exceeds 96 KiB.');
-    assertRstSectionPlacement(base.path, base.text, after);
     const hunks = createHunks(base, after);
+    assertRstSectionPlacement(base, hunks, after);
     return { base, summary: proposal.summary, hunks };
   }
 
@@ -107,6 +129,17 @@ export class AgentPatch {
   }
 
   authorize(binding: ApprovalBinding) {
+    this.#grant = this.#prepareGrant(binding);
+  }
+
+  async authorizeValidated(binding: ApprovalBinding, validate: (files: readonly ApprovedFile[]) => Promise<void>) {
+    const grant = this.#prepareGrant(binding);
+    await validate(grant.files);
+    if (this.#prepareGrant(binding).receipt.digest !== grant.receipt.digest) throw new VantaError('The selected hunks changed. Review the current selection and approve it again.');
+    this.#grant = grant;
+  }
+
+  #prepareGrant(binding: ApprovalBinding) {
     if (this.#closed || this.#grant) throw new VantaError('This proposal is already sealed.');
     const files: ApprovedFile[] = [];
     const operation = [];
@@ -115,14 +148,14 @@ export class AgentPatch {
       const accepted = hunks.filter((hunk) => hunk.status === 'accepted');
       if (!accepted.length) continue;
       const after = applyHunks(base, accepted);
-      assertRstSectionPlacement(path, base.text, after);
+      assertRstSectionPlacement(base, accepted, after);
       const ids = accepted.map((hunk) => hunk.id);
       files.push({ base, after, ids });
       operation.push([path, base.version, fingerprint(base.text), fingerprint(after), ids]);
     }
     if (!files.length) throw new VantaError('Accept at least one hunk or discard the proposal.');
     const reference = this.reference;
-    this.#grant = { files, receipt: { ...reference, files: files.map((file) => file.base.path),
+    return { files, receipt: { ...reference, files: files.map((file) => file.base.path),
       digest: fingerprint(JSON.stringify([binding, reference, operation])) } };
   }
 

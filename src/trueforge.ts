@@ -42,12 +42,19 @@ export type ModelFailure = {
 };
 
 const chooseModel = 'Choose another configured model in Agent Studio, then retry.';
+const providerStatus = (message: string) => /^\[Model Error\] Request failed \((\d{3})\):/i.exec(message)?.[1];
 
 export function modelFailure(message: string): ModelFailure {
-  if (/\bproperty\s+["']reasoning_content["']\s+is unsupported\b/i.test(message)) {
+  const status = providerStatus(message);
+  if (status === '504') return { kind: 'timeout', detail: `The model request timed out. ${chooseModel}` };
+  if (status === '500' || status === '502' || status === '503') {
+    return { kind: 'unavailable', limit: 'overload', detail: 'The configured model is temporarily unavailable. Retry after a short delay or choose another configured model.' };
+  }
+  if (status !== '401' && status !== '403' && status !== '429' && /\bproperty\s+["']reasoning_content["']\s+is unsupported\b/i.test(message)) {
     return { kind: 'other', detail: 'The model provider rejected the conversation history. Check the provider compatibility in TrueForge.' };
   }
-  if (/\b(?:401|403|UNAUTHENTICATED|PERMISSION_DENIED|INVALID_API_KEY)\b|API.key.{0,30}invalid|invalid.{0,15}API.key/i.test(message)) {
+  if (status === '401' || status === '403' || (status !== '429'
+    && /\b(?:401|403|UNAUTHENTICATED|PERMISSION_DENIED|INVALID_API_KEY)\b|API.key.{0,30}invalid|invalid.{0,15}API.key/i.test(message))) {
     return { kind: 'auth', detail: 'The provider denied model access. Check the model credentials in TrueForge or choose another configured model.' };
   }
   if (/\b429\b|RESOURCE_EXHAUSTED|rate.limit|quota/i.test(message)) {
@@ -82,7 +89,7 @@ export function modelFailure(message: string): ModelFailure {
 export function isFallbackFailure(message: string, failure: ModelFailure): boolean {
   // TrueForge v0.185.1 marks model-provider failures in terminal turn states with this prefix.
   if (!message.startsWith('[Model Error] ')) return false;
-  const status = /^\[Model Error\] Request failed \((\d{3})\):/i.exec(message)?.[1];
+  const status = providerStatus(message);
   if (status && !['429', '500', '502', '503', '504'].includes(status)) return false;
   return failure.kind === 'rate-limit' || failure.kind === 'unavailable' || failure.kind === 'timeout' || failure.kind === 'connection';
 }

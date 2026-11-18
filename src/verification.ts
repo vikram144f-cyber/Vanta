@@ -132,7 +132,7 @@ const stagingBootstrap = processBootstrap + String.raw`
 import ast, json
 from pathlib import Path
 
-before, after, insertions, suffix = json.loads(Path('source.json').read_text(encoding='utf-8'))
+before, after, edits, suffix = json.loads(Path('source.json').read_text(encoding='utf-8'))
 try:
     original = ast.parse(before).body
     candidate = ast.parse(after).body
@@ -140,12 +140,12 @@ except (SyntaxError, ValueError, RecursionError):
     sys.exit(0)
 
 definitions = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-for line, start, end in insertions:
+for line, first_unchanged, start, end in edits:
     if not any(isinstance(node, definitions) and start <= node.lineno <= end for node in candidate):
         continue
     for node in original:
         first = min((item.lineno for item in getattr(node, 'decorator_list', [])), default=node.lineno)
-        if isinstance(node, definitions) and first < line <= node.end_lineno:
+        if isinstance(node, definitions) and first < line <= first_unchanged <= node.end_lineno:
             print(f'The new top-level declaration splits an existing definition at original line {line}. '
                   f'Place it before line {first} or after line {node.end_lineno}, using a complete source boundary.')
             sys.exit(0)
@@ -191,27 +191,31 @@ if reported:
 export async function validatePythonStaging(python: string, { base, hunks }: StagedFile, signal: AbortSignal, ruff?: string) {
   const suffix = base.path.toLowerCase().match(/\.py[wi]?$/)?.[0];
   if (!suffix) return;
-  const insertions: [number, number, number][] = [];
+  const edits: [number, number, number, number][] = [];
   let shiftedLines = 0;
   for (const { start, end, replacement } of hunks) {
     const addedLines = replacement.split('\n').length - 1;
-    if (start === end && /^(?:async\s+def|def|class)\s/m.test(replacement)) {
+    const removedLines = base.text.slice(start, end).split('\n').length - 1;
+    if (/^(?:async\s+def|def|class)\s/m.test(replacement)) {
       const line = base.text.slice(0, start).split('\n').length;
-      insertions.push([line, line + shiftedLines, line + shiftedLines + addedLines - 1]);
+      const firstUnchanged = end < base.text.length ? line + removedLines : Number.MAX_SAFE_INTEGER;
+      const endLine = line + shiftedLines + addedLines - Number(replacement.endsWith('\n'));
+      edits.push([line, firstUnchanged, line + shiftedLines, endLine]);
     }
-    shiftedLines += addedLines - (base.text.slice(start, end).split('\n').length - 1);
+    shiftedLines += addedLines - removedLines;
   }
-  if (!insertions.length && !ruff) return;
+  if (!edits.length && !ruff) return;
   const snapshot = await mkdtemp(join(tmpdir(), 'vanta-python-staging-'));
   try {
     const script = join(snapshot, 'staging.py');
-    const source = JSON.stringify([base.text, applyHunks(base, hunks), insertions, suffix]);
+    const source = JSON.stringify([base.text, applyHunks(base, hunks), edits, suffix]);
     await writeFile(script, stagingBootstrap, { flag: 'wx' });
     await writeFile(join(snapshot, 'source.json'), source, { flag: 'wx' });
     const result = await execute(python, script, snapshot, ruff ? [ruff] : [], 'Python staging check', signal, 2_500, ['-S']);
     signal.throwIfAborted();
     if (ruff && result.status !== 'passed') throw new VantaError('The configured Ruff staging check could not finish. Check VANTA: Verification Ruff.');
-    if (result.status === 'passed' && result.output.trim()) throw new VantaError(result.output.trim());
+    if (result.status !== 'passed') throw new VantaError('The Python structural staging check could not finish.');
+    if (result.output.trim()) throw new VantaError(result.output.trim());
   } finally { await rm(snapshot, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }); }
 }
 

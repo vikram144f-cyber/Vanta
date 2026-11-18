@@ -5,7 +5,7 @@ import { TrueForgeError, TrueForgeTimeoutError } from '@truefoundry/trueforge-sd
 import type { OverviewBridge } from '../../src/mcp';
 import { parseStudioAction } from '../../src/protocol';
 import { StudioSession } from '../../src/session';
-import { localServerUrl, modelFailure, overviewToolName } from '../../src/trueforge';
+import { isFallbackFailure, localServerUrl, modelFailure, overviewToolName } from '../../src/trueforge';
 import type { ApprovalEvent, Event, Forge, SessionAgent } from '../../src/trueforge';
 import type { QuickTools } from '../../src/mcp';
 import type { ArchivedConversation, QuickEditTarget, Settings } from '../../src/session';
@@ -33,6 +33,10 @@ test('provider limit classification preserves retry guidance and omits raw detai
   assert.equal(modelFailure('429 GenerateContentRequestsPerMinutePerProjectPerRegion Please retry in 5.2s').retrySeconds, 6);
   assert.equal(modelFailure('RESOURCE_EXHAUSTED GenerateContentInputTokenCountPerMinute quota').limit, 'tpm');
   assert.equal(modelFailure('503 overload').limit, 'overload');
+  const transient = '[Model Error] Request failed (503): Maintenance in availability zone 403.';
+  assert.equal(modelFailure(transient).kind, 'unavailable');
+  assert.equal(isFallbackFailure(transient, modelFailure(transient)), true);
+  assert.equal(modelFailure('[Model Error] Request failed (403): Prior request 503 timed out.').kind, 'auth');
   assert.match(modelFailure('iteration limit of 32, please request again').detail, /tool iteration limit/);
   assert.doesNotMatch(modelFailure('429 nonsense synthetic-private-data').detail, /synthetic-private-data/);
 });

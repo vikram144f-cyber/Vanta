@@ -202,11 +202,12 @@ export class ContextEngine {
     return { items: output, omitted, limited, estimatedTokens: this.#spent, totalBudget: this.budget };
   }
 
-  async #sources(query: string, signal: AbortSignal) {
+  async #sources(query: string, signal: AbortSignal, priority: readonly string[] = []) {
     const catalog = await this.repository.catalog(signal);
     const words = terms(query);
     const pathScore = (name: string) => words.filter((word) => name.toLowerCase().includes(word)).length;
-    const paths = [...catalog.paths].sort((a, b) => pathScore(b) - pathScore(a) || a.length - b.length || a.localeCompare(b, 'en'));
+    const ranked = [...catalog.paths].sort((a, b) => pathScore(b) - pathScore(a) || a.length - b.length || a.localeCompare(b, 'en'));
+    const paths = [...new Set([...priority, ...ranked])];
     const files = new Map<string, SourceFile>();
     for (let i = 0; i < Math.min(paths.length, maxCandidateFiles); i += 8) {
       const batch = paths.slice(i, Math.min(i + 8, maxCandidateFiles));
@@ -391,14 +392,15 @@ export class ContextEngine {
     this.initialTask = undefined;
     const words = terms(query);
     if (!words.length) throw new VantaError('Provide task terms to look up in the workspace.');
-    const { files, limited, backend } = await this.#sources(query, signal);
-    const candidates: Candidate[] = [];
     const symbols = await this.repository.providerSymbols(words[0]!, undefined, signal);
+    const exact = symbols.filter((symbol) => words.includes(symbol.name.toLowerCase()));
+    const { files, limited, backend } = await this.#sources(query, signal, exact.map(({ path }) => path));
+    const candidates: Candidate[] = [];
     for (const [path, file] of files) {
       const name = path.split('/').at(-1)!.toLowerCase();
       const filenameWords = name.split(/[^\p{L}\p{N}]+/u);
       const pathWords = words.filter((word) => filenameWords.includes(word) || (word.length >= 4 && name.includes(word)));
-      const anchors = declarations(file, path).concat(symbols.filter((symbol) => symbol.path === path));
+      const exactSymbol = exact.find((symbol) => symbol.path === path);
       let bestLine = 0;
       let bestCount = 0;
       for (const [index, text] of file.lines.entries()) {
@@ -407,10 +409,10 @@ export class ContextEngine {
         const count = words.filter((word) => lineWords.has(word) || (word.length >= 4 && lower.includes(word))).length;
         if (count > bestCount) { bestLine = index; bestCount = count; }
       }
-      const anchor = anchors.find((item) => words.includes(item.name.toLowerCase()));
+      const anchor = exactSymbol ?? declarations(file, path).find((item) => words.includes(item.name.toLowerCase()));
       const score = pathWords.length * 10 + bestCount * 3 + (anchor ? 12 : 0);
       if (!score) continue;
-      const start = this.agentMode ? Math.max(1, bestLine - 4) : anchor?.start ?? Math.max(1, bestLine - 4);
+      const start = exactSymbol?.start ?? (this.agentMode ? Math.max(1, bestLine - 4) : anchor?.start ?? Math.max(1, bestLine - 4));
       const signals = [pathWords.length ? `filename matches ${pathWords.join(', ')}` : '',
         anchor ? `${anchor.source}: ${anchor.name}` : '', bestCount ? `task terms on line ${bestLine + 1}` : ''].filter(Boolean);
       candidates.push({ path, start, end: Math.min(file.lines.length, start + 22), file, score, reason: signals.join(' · '), symbol: anchor?.name, selected: false });

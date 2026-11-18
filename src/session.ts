@@ -1025,14 +1025,32 @@ export class StudioSession {
       if (apply && !approval.canAllow) return;
       if (feedback !== undefined && (apply || run.revisionInput || feedback.length > 4000 || agent.scope !== this.dependencies.scopeKey?.())) return;
       try {
-        if (apply) agent.patch.authorize({ workspace: agent.scope, session: run.sessionId, turn: run.turnId, call: approval.id });
-        else {
+        if (apply) {
+          const binding = { workspace: agent.scope, session: run.sessionId, turn: run.turnId, call: approval.id };
+          // The full draft was compiled before review. Recheck when hunk selection changes its contents.
+          const subset = [...agent.patch.files.values()].some(({ hunks }) => hunks.some(({ status }) => status === 'rejected'));
+          if (subset) {
+            await agent.patch.authorizeValidated(binding, async (files) => {
+              const signal = run.abort.signal;
+              const result = await checkPythonSyntax(agent.python, files.map(({ base, after }) => ({ path: base.path, text: after })), signal);
+              signal.throwIfAborted();
+              if (this.#active !== run || run.approval !== approval || agent.scope !== this.dependencies.scopeKey?.()) {
+                throw new VantaError('The Agent Mode review is no longer active.');
+              }
+              if (result && result.status !== 'passed') {
+                throw new VantaError(`The selected hunks failed Python syntax validation. ${result.output.trim() || result.status}`);
+              }
+            });
+          } else agent.patch.authorize(binding);
+        } else {
           run.reviewExit = { feedback };
           agent.patch.close();
         }
-        this.#set({ review: undefined });
+        this.#set({ review: undefined, error: undefined });
         await this.#decide(approval.id, apply);
-      } catch (error) { this.#set({ error: safeError(error) }); }
+      } catch (error) {
+        if (this.#active === run && run.approval === approval && !run.abort.signal.aborted) this.#set({ error: safeError(error) });
+      }
       return;
     }
     if (feedback !== undefined) return;

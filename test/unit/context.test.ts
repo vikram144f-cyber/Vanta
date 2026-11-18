@@ -7,6 +7,23 @@ import { ContextEngine, parseMentions } from '../../src/context';
 import type { ContextReport } from '../../src/context';
 import { Repository } from '../../src/repository';
 
+test('automatic context keeps an exact validated symbol beyond the lexical candidate limit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vanta-exact-symbol-'));
+  const path = 'unrelated/location-with-a-long-name.py';
+  const signal = new AbortController().signal;
+  try {
+    await mkdir(join(root, 'unrelated'));
+    await writeFile(join(root, path), 'value = 0\n\ndef orbit():\n    return 17\n');
+    await Promise.all(Array.from({ length: 270 }, (_, index) => writeFile(join(root, `a${index}.py`), 'value = 0\n')));
+    const repository = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false,
+      symbols: { find: async () => [{ path, start: 3, end: 4, name: 'orbit', kind: 'function', source: 'language service' }] } });
+    const result = await new ContextEngine(repository, 8000, () => undefined, true).bundle('orbit', signal);
+    assert.equal(result.limited, true);
+    assert.equal(result.items[0]?.path, path);
+    assert.match(result.items[0]?.text ?? '', /^def orbit/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('scoped repository discovery, symbols, mentions and budget', async () => {
   const folder = await mkdtemp(join(tmpdir(), 'vanta-context-'));
   const root = join(folder, 'repo');

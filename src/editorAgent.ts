@@ -44,36 +44,66 @@ export async function editorAgent(preview: QuickEdit['previewChanges']): Promise
         if (staged.version !== base.version) {
           throw new VantaError(`Agent Mode target was edited since staging: ${base.path}. Start a new request.`);
         }
-        return { path: base.path, document, version, before: base.text, after, current: () => document.getText() };
+        return { path: base.path, document, version, before: base.text, after, diskBefore: base.text, current: () => document.getText() };
       }));
-      const write = (selected: typeof entries[number][], undo: boolean) => {
+      const checkDisk = async (selected: readonly typeof entries[number][], dispatched: boolean, deadline: AbortSignal) => {
+        await Promise.all(selected.map(async ({ path, diskBefore, after }) => {
+          const disk = await repository.diskText(path, deadline);
+          if (disk !== diskBefore && (!dispatched || disk !== after)) {
+            throw new VantaError(`Agent Mode target changed on disk during the edit: ${path}. Review the disk and buffer contents before saving.`);
+          }
+        }));
+      };
+      const write = async (selected: readonly typeof entries[number][], rollback: boolean, deadline: AbortSignal, beforeDispatch?: () => void) => {
+        if (!rollback) {
+          await checkDisk(selected, false, deadline);
+          deadline.throwIfAborted();
+        }
         const edit = new vscode.WorkspaceEdit();
         if (!scope.isAvailable()) throw new VantaError('The trusted workspace changed.');
-        for (const { document, before, after } of selected) {
-          if (document.isClosed || document.getText() !== (undo ? after : before)) throw new VantaError('A target buffer changed.');
-          edit.replace(document.uri, new vscode.Range(new vscode.Position(0, 0), document.positionAt(document.getText().length)), undo ? before : after);
+        for (const { document, version, before, after } of selected) {
+          if (document.isClosed || (!rollback && document.version !== version)
+            || document.getText() !== (rollback ? after : before)) throw new VantaError('A target buffer changed.');
+          edit.replace(document.uri, new vscode.Range(new vscode.Position(0, 0), document.positionAt(document.getText().length)), rollback ? before : after);
         }
-        return vscode.workspace.applyEdit(edit);
+        if (!rollback) beforeDispatch?.();
+        const applied = await vscode.workspace.applyEdit(edit);
+        // Detect disk writes in the dispatch window and let applyBatch recover matching buffers.
+        if (applied && !rollback) await checkDisk(selected, true, AbortSignal.timeout(5000));
+        return applied;
+      };
+      const writeBatch = (targets: readonly typeof entries[number][], deadline: AbortSignal, beginCommit?: () => void) => {
+        let dispatched = false;
+        return applyBatch(targets, (selected, rollback) => {
+          if (rollback && !dispatched) return Promise.resolve(false);
+          return write(selected, rollback, deadline, () => {
+            beginCommit?.();
+            dispatched = true;
+          });
+        });
       };
       if (!scope.isAvailable() || entries.some(({ document, before, version }) => document.isClosed || document.isDirty
         || document.version !== version || document.getText() !== before)) {
         throw new VantaError('An Agent Mode target is dirty, closed or stale. Start a new request.');
       }
-      begin();
-      await applyBatch(entries, (selected, undo) => write([...selected], undo));
+      await writeBatch(entries, signal, begin);
       const versions = entries.map(({ document }) => document.version);
       captured.clear();
       return async () => {
         const deadline = AbortSignal.timeout(5000);
-        for (const { path, before, after } of entries) {
+        const reverse = await Promise.all(entries.map(async ({ path, before, after, document: original }, index) => {
           const disk = await repository.diskText(path, deadline);
-          if (disk !== before && disk !== after) throw new VantaError(`Cannot undo because ${path} changed on disk.`);
-        }
-        if (entries.some(({ document, after }, index) => document.isClosed || document.version !== versions[index] || document.getText() !== after)) {
-          throw new VantaError('Cannot undo because an affected editor buffer changed. Review the files in VS Code.');
-        }
-        await applyBatch(entries.map((entry) => ({ ...entry, before: entry.after, after: entry.before })),
-          (selected, undo) => write([...selected], undo));
+          const reopened = original.isClosed;
+          if ((disk !== before && disk !== after) || (reopened && disk !== after)) {
+            throw new VantaError(`Cannot undo because ${path} changed on disk.`);
+          }
+          const document = reopened ? await vscode.workspace.openTextDocument(original.uri) : original;
+          if (document.isClosed || original.version !== versions[index] || (reopened && document.isDirty) || document.getText() !== after) {
+            throw new VantaError('Cannot undo because an affected editor buffer changed. Review the files in VS Code.');
+          }
+          return { path, document, version: document.version, before: after, after: before, diskBefore: disk, current: () => document.getText() };
+        }));
+        await writeBatch(reverse, deadline);
       };
     },
   };
