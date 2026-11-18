@@ -1,12 +1,34 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyHunks, assertBase, createHunks, fingerprint, proposalSchema, QuickPatch, reviewSchema } from '../../src/quickPatch';
+import { applyHunks, assertBase, assertDocumentationEvidence, createHunks, explicitlyRequestsDocumentation,
+  fingerprint, proposalSchema, QuickPatch, reviewSchema } from '../../src/quickPatch';
 import type { BaseSelection } from '../../src/quickPatch';
 
 const before = 'before\r\nfirst 😀\r\nunchanged\r\nthird\r\nafter\r\n';
 const base: BaseSelection = { path: 'source.py', version: 7, text: before,
   start: before.indexOf('first'), end: before.indexOf('after'), eol: '\r\n' };
 const replacement = 'first edited 😀\nnew line\nunchanged\nthird edited\n';
+
+test('documentation checks reject implicit and invented coverage before review', () => {
+  const draft = new QuickPatch(base, 'Explain the mode', '// Normal mode is the default.\n');
+  const omitted = { scenario: 'Missing or blank mode', outcome: 'Select normal mode.',
+    documentation: { inputs: ['missing', 'blank'], quote: 'Normal mode is the default.' } };
+  const invented = { ...omitted, documentation: { ...omitted.documentation, quote: 'Missing or blank mode selects normal mode.' } };
+  assert.throws(() => assertDocumentationEvidence(draft, [{ scenario: 'Missing mode', outcome: 'Normal' }], true), /Provide a documentation quote/);
+  assert.throws(() => assertDocumentationEvidence(draft, [omitted], true), /specific input words/);
+  assert.throws(() => assertDocumentationEvidence(draft, [{
+    scenario: 'When mode is not provided, use the default.', outcome: 'Select normal mode.',
+    documentation: { inputs: ['default'], quote: 'Normal mode is the default.' },
+  }], true), /the quote does not name that condition/);
+  assert.throws(() => assertDocumentationEvidence(draft, [invented], true), /quote the actual wording/);
+  const corrected = new QuickPatch(base, 'Name both cases', '// Missing or blank mode\n// selects normal mode.\n');
+  assert.doesNotThrow(() => assertDocumentationEvidence(corrected, [
+    { ...invented, documentation: { ...invented.documentation, quote: 'Missing or blank mode\n// selects normal mode.' } },
+  ], true));
+  assert.equal(explicitlyRequestsDocumentation('Change the default and update its documentation.'), true);
+  assert.equal(explicitlyRequestsDocumentation('Fix the default without updating its documentation.'), false);
+  assert.equal(explicitlyRequestsDocumentation("Change the default. Don't update the documentation."), false);
+});
 
 test('independent CRLF and Unicode hunks apply at original offsets', () => {
   const hunks = createHunks(base, replacement);

@@ -7,8 +7,10 @@ import { applyHunks, createHunks } from '../../src/quickPatch';
 import { fingerprint } from '../../src/quickPatch';
 import type { StudioSession } from '../../src/session';
 import { editorAgent } from '../../src/editorAgent';
+import { verifyFallback } from './fallback';
 
 export async function run() {
+  if (process.env.VANTA_FALLBACK_FIXTURE) return verifyFallback(process.env.VANTA_FALLBACK_FIXTURE);
   const extension = vscode.extensions.getExtension('vikram144f-cyber.vanta');
   assert.ok(extension);
   await extension.activate();

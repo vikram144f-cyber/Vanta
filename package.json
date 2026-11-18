@@ -98,7 +98,13 @@
           "type": "string",
           "default": "",
           "scope": "application",
-          "description": "Optional second model registered in TrueForge. Tries it once in a new session after a confirmed model failure before any model output or tool activity."
+          "description": "Optional second model registered in TrueForge for automatic fallback."
+        },
+        "vanta.automaticFallback": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Try the configured secondary model once after an early, confirmed transient model-provider failure."
         },
         "vanta.agentName": {
           "type": "string",
@@ -133,6 +139,20 @@
           "default": "",
           "scope": "application",
           "description": "Absolute path to the trusted Python interpreter with pytest and project dependencies for Agent Mode."
+        },
+        "vanta.verificationRuff": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Optional absolute path to a trusted Ruff executable for checking newly introduced undefined Python names before staging."
+        },
+        "vanta.verificationFixtureFiles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 40,
+          "default": [],
+          "scope": "application",
+          "description": "Absolute paths of synthetic test fixture files to include only in approved pytest snapshots for their trusted workspace. Hidden fixtures explicitly listed here are eligible."
         }
       }
     }
@@ -144,6 +164,7 @@
     "lint": "eslint .",
     "test": "tsx --test test/unit/*.test.ts",
     "test:extension": "npm run build && node scripts/test-extension.mjs",
+    "test:fallback": "node scripts/test-fallback.mjs",
     "test:live": "tsx --test --test-concurrency=1 test/live/*.test.ts",
     "vscode:prepublish": "npm run build"
   },

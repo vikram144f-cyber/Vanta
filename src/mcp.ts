@@ -10,8 +10,8 @@ import { overviewToolName, VantaError } from './trueforge';
 import { bindOverview } from './workspace';
 import type { WorkspaceScope } from './workspace';
 import type { ContextEngine, Snippet } from './context';
-import { proposeTool, proposalSchema, reviewSchema, reviewTool } from './quickPatch';
-import type { QuickPatch, ReviewReceipt } from './quickPatch';
+import { checkQuickTool, proposeTool, proposalSchema, quickCheckSchema, reviewSchema, reviewTool } from './quickPatch';
+import type { QuickCheck, QuickPatch, ReviewReceipt } from './quickPatch';
 import { reviewAgentSchema, reviewAgentTool, stageAgentSchema, stageAgentTool, verifyAgentSchema, verifyAgentTool } from './agentPatch';
 import type { AgentPatch, AgentReceipt, FileProposal, ReviewReference } from './agentPatch';
 
@@ -23,6 +23,7 @@ export interface AgentTools {
 
 export interface QuickTools {
   stage(replacement: string, explanation: string): QuickPatch;
+  check(input: QuickCheck): QuickPatch;
   receipt(id: string): ReviewReceipt;
 }
 
@@ -159,7 +160,8 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
       inputSchema: { query, path: path.optional() }, annotations: readOnly,
     }, (args) => expose((repo, deadline) => repo.symbols(args.query, args.path, deadline)));
     server.registerTool('get_context_bundle', {
-      description: 'Rank relevant repository locations for a natural-language task, with bounded snippets and selection reasons. Use for unexplored tasks involving code, tests and documentation.',
+      description: 'Rank relevant repository locations for a natural-language task, with bounded snippets and selection reasons. Use for unexplored tasks involving code, tests and documentation.'
+        + (agent ? ' The first lookup uses the original user request to preserve its task terms. Later lookups use the query argument.' : ''),
       inputSchema: { query }, annotations: readOnly,
     }, (args) => expose(async (repo, deadline) => ({ ...await repo.bundle(args.query, deadline), remainingTokens: repo.remainingTokens }), agent ? sourceEvidence : undefined));
     if (quick) {
@@ -169,13 +171,18 @@ export async function startOverviewBridge(scope: WorkspaceScope, signal: AbortSi
         catch (error) { return failure(error instanceof VantaError ? error.message : 'Could not stage the Quick Edit.'); }
       };
       server.registerTool(proposeTool, {
-        description: 'Stage a replacement for exactly the captured selection. Supply the full replacement for the selection, preserving unchanged text, indentation and edge newlines. Return the proposal ID for review.',
+        description: 'Stage a draft for exactly the captured selection. Supply the full replacement preserving unchanged text, indentation and edge newlines. Return the draft ID and changed lines for a separate check.',
         inputSchema: proposalSchema, annotations: readOnly,
       }, ({ replacement, explanation }) => edit(() => {
         const patch = quick.stage(replacement, explanation);
         return { proposalId: patch.id, path: patch.base.path, version: patch.base.version, originalFingerprint: patch.baseDigest,
-          explanation: patch.explanation, hunks: patch.hunks.map(({ id, start, end, replacement }) => ({ id, start, end, replacement })) };
+          explanation: patch.explanation, hunks: patch.hunks.map(({ id, start, end, replacement }) =>
+            ({ id, start, end, original: patch.base.text.slice(start, end), replacement })) };
       }));
+      server.registerTool(checkQuickTool, {
+        description: 'Check each outcome against the final code. For each scenario the user wants documented, supply documentation.inputs with the concrete words or values that identify it in the scenario and documentation.quote with the exact wording that names those inputs. If the draft lacks that wording, include a complete correction. Returns the proposal ID for native review.',
+        inputSchema: quickCheckSchema, annotations: readOnly,
+      }, (input) => edit(() => ({ proposalId: quick.check(input).id })));
       server.registerTool(reviewTool, {
         description: 'Ask the user to review a staged Quick Edit proposal by exact proposal ID. This checkpoint returns a receipt and cannot write to the workspace.',
         inputSchema: reviewSchema, annotations: readOnly,

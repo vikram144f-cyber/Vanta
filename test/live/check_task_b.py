@@ -2,6 +2,7 @@
 
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -36,9 +37,14 @@ def main():
         command = [sys.executable, "-m", "flask", "--app", str(app)]
         help_text = subprocess.check_output([*command, "--help"], text=True)
         description = next(
-            line.strip() for line in help_text.splitlines()
-            if line.strip().split()[:1] == ["config"]
+            (
+                line.strip()
+                for line in help_text.splitlines()
+                if line.strip().split()[:1] == ["config"]
+            ),
+            None,
         )
+        assert description, "flask --help did not list config. Check that the approved files were saved."
         routes = subprocess.check_output([*command, "routes"], text=True)
         assert any(row.split() == ["task_b_route", "GET", "/task-b-route"]
                    for row in routes.splitlines()), routes
@@ -52,7 +58,16 @@ def main():
         if any(part in key.upper() for part in ("SECRET", "PASSWORD", "TOKEN", "KEY")):
             assert value == "***", key
     assert data["DEMO_DURATION"] is not None
-    assert "flask config" in (root / "docs" / "cli.rst").read_text(encoding="utf-8")
+    docs = (root / "docs" / "cli.rst").read_text(encoding="utf-8")
+    headings = list(re.finditer(r"^([^\s][^\n]*)\n-{3,}[ \t]*$", docs, re.MULTILINE))
+    titles = [heading[1] for heading in headings]
+    # Built-ins can be documented immediately before, between, or after the existing peers.
+    after_discovery = titles.index("Application Discovery") + 1
+    dotenv = titles.index("Environment Variables From dotenv")
+    built_in_sections = docs[headings[after_discovery].start() : headings[dotenv].start()]
+    assert re.search(
+        r"\bflask(?:[ \t]+--app(?:[ \t]+|=)\S+)?[ \t]+config\b", built_in_sections
+    ), "The flask config example belongs alongside the run and shell sections."
     print(f"Flask source: {imported.relative_to(root)}")
     print(f"CLI help: {description}")
     print(json.dumps({key: data[key] for key in (*public, *secret, "DEMO_DURATION")}, sort_keys=True))

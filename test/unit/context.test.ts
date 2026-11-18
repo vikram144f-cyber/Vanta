@@ -92,8 +92,9 @@ test('Agent Mode bundle includes nearby implementation, test, and documentation 
 
     const repository = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
     const reports: ContextReport[] = [];
-    const context = new ContextEngine(repository, 8000, (report) => reports.push(report), true);
-    const result = await context.bundle('Add the flask config command, test JSON masking, and document it in CLI', signal);
+    const task = 'Add the flask config command, test JSON masking, and document it in CLI';
+    const context = new ContextEngine(repository, 8000, (report) => reports.push(report), true, undefined, task);
+    const result = await context.bundle('JSON config', signal);
     const serialized = JSON.stringify(result.items);
     assert.match(serialized, /Existing registration or entry point/);
     assert.match(serialized, /Existing handler definition/);
@@ -170,5 +171,46 @@ test('Agent Mode reserves source lines for actual Python boundaries across a cli
     assert.match([changed, ...changed.continuation ?? []].map(({ text }) => text).join('\n'), /return reversed/);
     const limited = new ContextEngine(repository, 60, () => undefined, true, process.env.VANTA_TEST_PYTHON);
     assert.equal((await limited.readRanges([clipped], 24, signal)).ranges[0]?.status, 'budget_skipped');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('Agent Mode includes a Python handler wrapper and a local dependency that changes fixture state', { skip: !process.env.VANTA_TEST_PYTHON }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vanta-context-setup-'));
+  const signal = new AbortController().signal;
+  const source = [
+    'class QueueState:',
+    '    def prepare(self):',
+    ...Array.from({ length: 20 }, () => '        pass'),
+    '        self.enabled = False',
+    '        return self',
+    '',
+    'def with_state(handler):',
+    '    def wrapped(state):',
+    '        return handler(state.prepare())',
+    '    return wrapped',
+    '',
+    'def register(registry):',
+    '    registry.add_command(inspect_queue)',
+    ...Array.from({ length: 12 }, () => ''),
+    '@registry.command("inspect")',
+    '@with_state',
+    'def inspect_queue(state):',
+    '    return state.enabled',
+    ...Array.from({ length: 24 }, () => ''),
+    '# queue summary format documentation',
+  ].join('\n');
+  try {
+    await writeFile(join(root, 'queue.py'), source);
+    const repo = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
+    const reports: ContextReport[] = [];
+    const context = new ContextEngine(repo, 8000, (report) => reports.push(report), true, process.env.VANTA_TEST_PYTHON);
+    const result = await context.bundle('Add a queue summary command and document the format', signal);
+    const setup = result.items.filter(({ reason }) => reason === 'Possible local handler setup');
+    assert.deepEqual(setup.map(({ symbol }) => symbol), ['with_state', 'prepare']);
+    assert.match(setup[0]!.text, /handler\(state\.prepare\(\)\)/);
+    assert.match(setup[1]!.text, /def prepare/);
+    assert.match(setup[1]!.continuation?.[0]?.text ?? '', /self\.enabled = False/);
+    assert.ok(reports[0]?.hits.some((hit) => hit.selected && hit.symbol === 'prepare'));
+    assert.ok(reports.every((report) => report.estimatedTokens <= report.budget));
   } finally { await rm(root, { recursive: true, force: true }); }
 });

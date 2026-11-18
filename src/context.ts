@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import { VantaError } from './trueforge';
 import type { Location, Repository, SourceFile, SymbolLocation } from './repository';
 import { pythonBoundaries } from './verification';
-import type { PythonBoundary } from './verification';
+import type { PythonBoundary, PythonExcerpt } from './verification';
 
 export const contextTools = ['list_workspace_files', 'search_workspace', 'read_file', 'find_symbol', 'get_context_bundle'] as const;
 const stopWords = new Set('about add and are built code could definition does explain file files find for from function get have how into likely me modify need new of parts probably related repository responsible should show tell that the their them this use want what where which with would'.split(' '));
@@ -109,7 +109,7 @@ export class ContextEngine {
   readonly #sharedLines = new Map<string, Map<number, string>>();
 
   constructor(readonly repository: Repository, readonly budget: number, private readonly publish: (report: ContextReport) => void,
-    private readonly agentMode = false, private readonly python?: string) {}
+    private readonly agentMode = false, private readonly python?: string, private initialTask?: string) {}
 
   get remainingTokens() { return Math.max(0, this.budget - this.#spent); }
 
@@ -209,14 +209,16 @@ export class ContextEngine {
     return this.#emit('Open file', [{ path, start, end: excerpt.end, reason: `Requested range · ${file.source}`, selected: false }], [excerpt], 2200);
   }
 
-  async #withPythonBoundaries<T extends Snippet>(items: readonly { excerpt: T; file: SourceFile; maxLines: number }[], signal: AbortSignal) {
+  async #withPythonBoundaries<T extends Snippet>(
+    items: readonly { excerpt: T; file: SourceFile; maxLines: number; includeSetup?: boolean }[], signal: AbortSignal,
+  ) {
     const python = this.python;
     if (!this.agentMode || !python) return items.map(({ excerpt }) => excerpt);
-    const sources = new Map<SourceFile, [number, number, number][]>();
-    for (const [index, { excerpt, file, maxLines }] of items.entries()) {
+    const sources = new Map<SourceFile, PythonExcerpt[]>();
+    for (const [index, { excerpt, file, maxLines, includeSetup }] of items.entries()) {
       if (maxLines < 6 || !/\.py[wi]?$/i.test(excerpt.path)) continue;
       const ranges = sources.get(file) ?? [];
-      ranges.push([index, excerpt.start, excerpt.end]);
+      ranges.push([index, excerpt.start, excerpt.end, !!includeSetup]);
       sources.set(file, ranges);
     }
     const bounds = await pythonBoundaries(python, [...sources].map(([file, ranges]) => [file.lines.join('\n'), ranges]), signal)
@@ -312,6 +314,8 @@ export class ContextEngine {
   }
 
   async bundle(query: string, signal: AbortSignal) {
+    if (this.initialTask && terms(this.initialTask).length) query = this.initialTask;
+    this.initialTask = undefined;
     const words = terms(query);
     if (!words.length) throw new VantaError('Provide task terms to look up in the workspace.');
     const { files, limited, backend } = await this.#sources(query, signal);
@@ -418,8 +422,20 @@ export class ContextEngine {
     const fresh = [...new Set([...representatives, ...ranked])].filter((hit) => !(this.#seen.get(hit.path) ?? [])
       .some((sent) => sent.start <= hit.end && sent.end >= hit.start));
     const top = fresh.slice(0, this.agentMode ? 9 : 12);
-    const payload = await this.#withPythonBoundaries(top.map(({ path, file, start, end, reason, symbol }) => ({ file, maxLines: end - start + 1,
-      excerpt: { ...snippet(path, file, start, end), reason, symbol } })), signal);
+    const bounded = await this.#withPythonBoundaries(top.map(({ path, file, start, end, reason, symbol }) => ({ file, maxLines: end - start + 1,
+      includeSetup: reason === 'Existing handler definition', excerpt: { ...snippet(path, file, start, end), reason, symbol } })), signal);
+    const payload = bounded.flatMap((item, index) => {
+      const boundary = item.pythonBoundary;
+      if (!boundary?.setup?.length) return [item];
+      const { setup, ...pythonBoundary } = boundary;
+      const { file, path } = top[index]!;
+      const related = setup.map(({ name, declaration, start, end }) => {
+        const tail = snippet(path, file, start, end);
+        const excerpt = declaration < start ? { ...snippet(path, file, declaration, declaration), continuation: [tail] } : tail;
+        return { ...excerpt, reason: 'Possible local handler setup', symbol: name };
+      });
+      return [{ ...item, pythonBoundary }, ...related];
+    });
     const hits: ContextHit[] = payload.map(({ path, start, end, reason, symbol }) => ({ path, start, end, reason, symbol, selected: false }));
     const output = this.#emit('Context bundle', hits, payload, Math.floor(this.budget * (this.agentMode ? 0.46 : 0.6)), limited || fresh.length > top.length, backend);
     for (const hit of hits.filter((item) => item.selected)) this.#seen.set(hit.path, [...(this.#seen.get(hit.path) ?? []), hit]);

@@ -34,6 +34,15 @@ export function safeRelativePath(path: string): boolean {
     && !excluded.test(segment) && !sensitive.test(segment) && !device.test(segment));
 }
 
+function safeFixturePath(path: string): boolean {
+  if (safeRelativePath(path)) return true;
+  const directory = path.slice(0, Math.max(path.lastIndexOf('/'), 0));
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  return path.length <= 480 && !path.startsWith('/') && (!directory || safeRelativePath(directory))
+    && /^\.[\p{L}\p{N}_-][\p{L}\p{N}_.-]{0,118}$/u.test(name) && !name.endsWith('.')
+    && !/^\.(?:git|hg|svn|vanta)(?:$|[._-])/i.test(name) && !sensitive.test(name);
+}
+
 function childOf(root: string, absolute: string): boolean {
   const child = relative(root, absolute);
   return !!child && child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child);
@@ -101,10 +110,12 @@ export class Repository {
     return new Repository(root, verify, options);
   }
 
-  async #checked(relativePath: string, signal: AbortSignal, directory = false, ignoreFile = false) {
+  async #checked(relativePath: string, signal: AbortSignal, directory = false, kind: 'source' | 'ignore' | 'fixture' = 'source') {
     const segments = relativePath.split('/');
-    if (!safeRelativePath(relativePath) && !(ignoreFile && segments.pop() === '.gitignore'
-      && (!segments.length || safeRelativePath(segments.join('/'))))) throw new VantaError('Path is outside the workspace policy.');
+    if (!safeRelativePath(relativePath) && !(kind === 'ignore' && segments.pop() === '.gitignore'
+      && (!segments.length || safeRelativePath(segments.join('/')))) && !(kind === 'fixture' && safeFixturePath(relativePath))) {
+      throw new VantaError('Path is outside the workspace policy.');
+    }
     signal.throwIfAborted();
     await this.verify();
     const path = join(this.root, ...relativePath.split('/'));
@@ -116,13 +127,13 @@ export class Repository {
     return { path, info };
   }
 
-  async #readBytes(path: string, signal: AbortSignal, limit: number, ignoreFile = false): Promise<string> {
-    const before = await this.#checked(path, signal, false, ignoreFile);
+  async #readBytes(path: string, signal: AbortSignal, limit: number, kind: 'source' | 'ignore' | 'fixture' = 'source'): Promise<string> {
+    const before = await this.#checked(path, signal, false, kind);
     if (before.info.size > limit) throw new VantaError('File exceeds the supported read size.');
     const file = await open(before.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     try {
       const info = await file.stat();
-      const after = await this.#checked(path, signal, false, ignoreFile);
+      const after = await this.#checked(path, signal, false, kind);
       if (!info.isFile() || info.nlink !== 1 || info.ino !== before.info.ino || info.dev !== before.info.dev
         || info.ino !== after.info.ino || info.dev !== after.info.dev) throw new VantaError('File changed during validation.');
       const bytes = Buffer.alloc(limit + 1);
@@ -137,7 +148,7 @@ export class Repository {
   #ignoreRules(folder: string, signal: AbortSignal) {
     let rules = this.#ignore.get(folder);
     if (!rules) {
-      rules = this.#readBytes(folder ? `${folder}/.gitignore` : '.gitignore', signal, 64 * 1024, true)
+      rules = this.#readBytes(folder ? `${folder}/.gitignore` : '.gitignore', signal, 64 * 1024, 'ignore')
         .then((text) => ignore({ ignorecase: process.platform === 'win32' }).add(text), (error: unknown) => {
           signal.throwIfAborted();
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new VantaError('Could not safely read workspace ignore rules.');
@@ -175,18 +186,35 @@ export class Repository {
     return this.#readBytes(path, signal, maxFileBytes);
   }
 
-  async snapshot(signal: AbortSignal, copy: (path: string, text: string) => Promise<void>) {
+  verificationFixtures(files: unknown): string[] {
+    if (!Array.isArray(files) || files.length > 40 || files.some((file) => typeof file !== 'string' || !isAbsolute(file))) {
+      throw new VantaError('Use up to 40 absolute fixture file paths in VANTA: Verification Fixture Files.');
+    }
+    const paths = [...new Set(files.map(normalizeWorkspacePath)
+      .filter((file) => childOf(this.root, file)).map((file) => relative(this.root, file).split(sep).join('/')))];
+    if (paths.some((path) => !safeFixturePath(path))) throw new VantaError('A configured verification fixture is outside the workspace file policy.');
+    return paths;
+  }
+
+  async snapshot(signal: AbortSignal, copy: (path: string, text: string) => Promise<void>, fixtures: readonly string[] = []) {
     const catalog = await this.#collect(signal);
-    if (catalog.truncated) throw new VantaError('This workspace exceeds the file limit for verification.');
+    const fixturePaths = new Set(fixtures);
+    const paths = new Set([...catalog.paths, ...fixturePaths]);
+    if (catalog.truncated || paths.size > maxFiles) throw new VantaError('This workspace exceeds the file limit for verification.');
     let size = 0;
-    for (const path of catalog.paths) {
+    for (const path of paths) {
       signal.throwIfAborted();
-      const checked = await this.#checked(path, signal);
-      if (checked.info.size > maxFileBytes) continue;
+      const configured = fixturePaths.has(path);
+      const kind = configured ? 'fixture' : 'source';
       let text;
-      try { text = await this.#readBytes(path, signal, maxFileBytes); }
+      try {
+        if (!configured && (await this.#checked(path, signal)).info.size > maxFileBytes) continue;
+        text = await this.#readBytes(path, signal, maxFileBytes, kind);
+      }
       catch (error) {
-        if (error instanceof TypeError || (error instanceof VantaError && error.message === 'File is too large or is binary.')) continue;
+        signal.throwIfAborted();
+        if (!configured && (error instanceof TypeError || (error instanceof VantaError && error.message === 'File is too large or is binary.'))) continue;
+        if (configured) throw new VantaError(`Could not safely read the configured verification fixture ${path}.`);
         throw error;
       }
       size += Buffer.byteLength(text);

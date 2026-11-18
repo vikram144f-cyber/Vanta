@@ -4,6 +4,7 @@ import { startOverviewBridge } from './mcp';
 import { parseStudioAction } from './protocol';
 import type { StudioUpdate } from './protocol';
 import { StudioSession } from './session';
+import type { ArchivedConversation } from './session';
 import { TrueForgeClient } from './trueforge';
 import { workspaceRepository, workspaceScope } from './editorRepository';
 import { QuickEdit, quickEditScheme } from './quickEdit';
@@ -52,9 +53,11 @@ class StudioView implements vscode.WebviewViewProvider {
         case 'selectModel': this.session.selectModel(action.model); break;
         case 'cancelRun': void this.session.cancel(); break;
         case 'clearConversation': this.session.clear(); break;
+        case 'openConversation': this.session.openConversation(action.id); break;
         case 'decideApproval': void this.session.decide(action.id, action.allow); break;
         case 'reviewHunk': void this.session.reviewHunk(action.id, action.hunk, action.decision); break;
         case 'finishReview': void this.session.finishReview(action.id, action.apply); break;
+        case 'rejectAndRevise': void this.session.finishReview(action.id, false, action.diagnostic); break;
         case 'reviseProposal': void this.session.reviseProposal(action.id, action.diagnostic); break;
         case 'rejectRemaining': this.session.rejectRemaining(action.id); break;
         case 'openContext':
@@ -113,14 +116,21 @@ export function activate(context: vscode.ExtensionContext) {
         serverUrl: config.get('serverUrl', 'http://localhost:8790'),
         model: config.get('model', '').trim(),
         secondaryModel: config.get('secondaryModel', '').trim(),
+        automaticFallback: config.get('automaticFallback', true),
         agentName: config.get('agentName', '').trim(),
         workspaceOverview: config.get('workspaceOverview', true),
         verificationPython: config.get('verificationPython', '').trim(),
+        verificationRuff: config.get('verificationRuff', '').trim(),
+        verificationFixtureFiles: config.get<unknown>('verificationFixtureFiles', []),
         contextBudget: contextBudget(),
       };
     },
     forge: (url) => new TrueForgeClient(url),
     scopeKey: () => workspaceScope()?.path ?? '',
+    history: {
+      load: () => context.workspaceState.get<ArchivedConversation[]>('conversationHistory.v1', []),
+      save: (entries) => context.workspaceState.update('conversationHistory.v1', entries),
+    },
     repository: workspaceRepository,
     agentWorkspace: () => editorAgent(quickEdit.previewChanges.bind(quickEdit)),
     bridge: async (signal, name, context, quick, agent) => {
@@ -144,6 +154,7 @@ export function activate(context: vscode.ExtensionContext) {
       if (event.affectsConfiguration('vanta')) void studio.refresh();
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => { void studio.workspaceChanged(); }),
+    vscode.workspace.onDidGrantWorkspaceTrust(() => { void studio.workspaceChanged(); }),
   );
 }
 

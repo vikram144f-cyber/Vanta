@@ -16,3 +16,5 @@ Windows checks used Node.js 22.17.0, npm 10.9.2, VS Code 1.146.0, and Python 3.1
 No Gemini requests were made by this preparation and no official Flask Task B attempt was started. The offline HTTP 503 demonstration remains documented in [M6 verification](M6_VERIFICATION.md). The official Task B success criteria remain open, even though the separate invoice adapter fixture passed. The [timed script](DEMO_SCRIPT.md) preserves that distinction.
 
 The demo has a 3:55 recording plan. The published video, confirmed team roster, final video timestamps, signed-out link checks and portal submission remain separate deliverables. [Submission checklist](DEMO_CHECKLIST.md).
+
+For the later native Task B and Task C passes, live cancellation and the current release checklist, see [Round 1 readiness](ROUND1_READINESS.md).

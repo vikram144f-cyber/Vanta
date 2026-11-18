@@ -10,7 +10,7 @@ import { overviewToolName } from '../../src/trueforge';
 import { bindOverview } from '../../src/workspace';
 import { ContextEngine, contextTools } from '../../src/context';
 import { Repository } from '../../src/repository';
-import { QuickPatch, proposeTool, reviewTool } from '../../src/quickPatch';
+import { checkQuickTool, QuickPatch, proposeTool, reviewTool } from '../../src/quickPatch';
 import { AgentPatch, verifyAgentTool } from '../../src/agentPatch';
 import { VantaError } from '../../src/trueforge';
 
@@ -88,18 +88,29 @@ test('authorized HTTP repository reads are bounded and reject traversal', async 
   }
 });
 
-test('MCP proposal stages in memory and a review call cannot authorize itself', async () => {
+test('MCP checks a Quick Edit draft in memory without authorizing review', async () => {
   const root = await mkdtemp(join(tmpdir(), 'vanta-mcp-edit-'));
   const scope = { path: root, isAvailable: () => true };
   const abort = new AbortController();
   let patch: QuickPatch | undefined;
+  let checked = false;
   const text = 'first\nkeep\nlast\n';
   const bridge = await startOverviewBridge(scope, abort.signal, undefined, undefined, {
     stage: (replacement, explanation) => {
       patch = new QuickPatch({ path: 'source.py', text, version: 1, start: 0, end: text.length, eol: '\n' }, explanation, replacement);
       return patch;
     },
-    receipt: (id) => patch!.consume(id),
+    check: ({ proposalId, checks, correction }) => {
+      assert.equal(proposalId, patch!.id);
+      assert.deepEqual(checks, [{ scenario: 'Unchanged line', outcome: 'The middle line stays.' }]);
+      assert.equal(correction, undefined);
+      checked = true;
+      return patch!;
+    },
+    receipt: (id) => {
+      if (!checked) throw new VantaError('Check the draft first.');
+      return patch!.consume(id);
+    },
   });
   const client = new Client({ name: 'local-test', version: '1.0.0' });
   try {
@@ -109,8 +120,17 @@ test('MCP proposal stages in memory and a review call cannot authorize itself', 
     assert.equal(invalid.isError, true);
     const proposal = await client.callTool({ name: proposeTool, arguments: { replacement: 'FIRST\nkeep\nLAST\n', explanation: 'Two changes' } });
     assert.equal(proposal.isError, undefined);
+    assert.match(JSON.stringify(proposal.content), /original.*first/);
     assert.ok(patch);
     const args = { name: reviewTool, arguments: { proposalId: patch.id } };
+    assert.equal((await client.callTool(args)).isError, true);
+    const check = { name: checkQuickTool, arguments: { proposalId: patch.id, checks: [] as { scenario: string; outcome: string }[] } };
+    assert.equal((await client.callTool(check)).isError, true);
+    assert.equal(checked, false);
+    check.arguments.checks = [{ scenario: 'Unchanged line', outcome: 'The middle line stays.' }];
+    const checkedDraft = await client.callTool(check);
+    assert.equal(checkedDraft.isError, undefined);
+    assert.match(JSON.stringify(checkedDraft.content), new RegExp(patch.id));
     assert.equal((await client.callTool(args)).isError, true);
     patch.decide(1, 'rejected');
     patch.decide(2, 'accepted');

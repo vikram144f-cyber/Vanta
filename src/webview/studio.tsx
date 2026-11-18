@@ -11,6 +11,7 @@ const titles = { checking: 'Connecting', connected: 'Connected', offline: 'Offli
 function Studio() {
   const [state, setState] = useState<StudioState>();
   const [draft, setDraft] = useState('');
+  const [rejection, setRejection] = useState({ id: '', text: '' });
   const [shareContext, setShareContext] = useState(false);
   const [agentMode, setAgentMode] = useState(false);
   const log = useRef<HTMLElement>(null);
@@ -31,6 +32,12 @@ function Studio() {
   useEffect(() => {
     if (log.current && atBottom.current) log.current.scrollTop = log.current.scrollHeight;
   }, [state?.messages]);
+  useEffect(() => {
+    setDraft('');
+    setRejection({ id: '', text: '' });
+    setShareContext(false);
+    atBottom.current = true;
+  }, [state?.conversationId]);
 
   if (!state) return <main className="boot" role="status">Opening Agent Studio…</main>;
   const { connection, messages, activity, phase, approval, sessionId, error } = state;
@@ -130,8 +137,17 @@ function Studio() {
           onClick={() => host.postMessage({ type: 'rejectRemaining', id: review.id })}>Reject remaining</button>
         <button type="button" className="primary" disabled={review.hunks.some((hunk) => hunk.status === 'pending') || !review.hunks.some((hunk) => hunk.status === 'accepted')}
           onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: true })}>{review.files ? 'Approve selected hunks' : 'Apply accepted changes'}</button></>}
-        <button type="button" onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: false })}>Discard proposal</button>
+        {review.canRevise && <button type="button" onClick={() => {
+          host.postMessage({ type: 'rejectAndRevise', id: review.id, diagnostic: rejection.id === review.id ? rejection.text : '' });
+          setRejection({ id: '', text: '' });
+        }}>Reject &amp; Revise</button>}
+        <button type="button" onClick={() => host.postMessage({ type: 'finishReview', id: review.id, apply: false })}>{review.files ? 'Discard & Stop' : 'Discard proposal'}</button>
       </div>
+      {review.canRevise && <label>Optional rejection reason
+        <textarea rows={2} maxLength={4000} value={rejection.id === review.id ? rejection.text : ''}
+          onChange={(event) => setRejection({ id: review.id, text: event.currentTarget.value })} />
+        <span className="muted">Reject &amp; Revise shares the staged edits, nearby source and available diagnostics with the selected model for one correction.</span>
+      </label>}
     </section>}
 
     <details className="activity" open={activity.length ? true : undefined}>
@@ -163,7 +179,7 @@ function Studio() {
           </div>
         </>}
       </details>
-      {state.changes && <details open><summary>Changes</summary>
+      {state.changes && <details open><summary>Workspace changes</summary>
         <p>{state.changes.status === 'applied' ? 'Applied to editor buffers. Save in VS Code to persist changes.' : 'Undone in editor buffers.'}</p>
         <ul>{state.changes.paths.map((path) => <li key={path}>{path}</li>)}</ul>
         {state.changes.status === 'applied' && <button type="button" disabled={busy} onClick={() => host.postMessage({ type: 'undoAgent' })}>Undo Agent changes</button>}
@@ -189,9 +205,14 @@ function Studio() {
       </div>
       {state.sessionId && <p className="muted context-note">{state.agentMode ? 'Agent Mode uses a separate TrueForge session for each request.'
         : state.quickEdit ? 'Quick Edit uses a separate TrueForge session.' : 'Follow-ups can use context shared earlier in this conversation.'}</p>}
-      {state.revision && !busy && <p className="muted context-note">{state.revision.needsFeedback ? 'Enter the specific failure or checker result above. ' : ''}
-        Request revision sends the failed edits and your feedback to the selected model in a fresh run. Include only diagnostics you want to share.</p>}
+      {state.revision && !busy && <p className="muted context-note">Request revision sends the staged edits and verification status to the selected model in a fresh run. You can add a diagnostic above.</p>}
       <div className="composer-footer">
+        {!!state.history?.length && <label className="history-control"><span className="sr-only">Conversation history</span>
+          <select value="" disabled={busy} onChange={(event) => host.postMessage({ type: 'openConversation', id: event.currentTarget.value })}>
+            <option value="" disabled>Conversation history</option>
+            {state.history.map(({ id, title }) => <option key={id} value={id}>{title}</option>)}
+          </select>
+        </label>}
         <button type="button" className="subtle" disabled={busy || !messages.length} onClick={() => {
           host.postMessage({ type: 'clearConversation' });
           prompt.current?.focus();
@@ -204,7 +225,7 @@ function Studio() {
           prompt.current?.focus();
         }}>Restore prompt</button>}
         {state.revision && !busy && <button type="button" disabled={connection.status !== 'connected' || !connection.selectedModel
-          || draft.trim().length > 4000 || (state.revision.needsFeedback && !draft.trim())}
+          || draft.trim().length > 4000}
           onClick={() => {
             if (!state.revision) return;
             host.postMessage({ type: 'reviseProposal', id: state.revision.id, diagnostic: draft.trim() });

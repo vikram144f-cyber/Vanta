@@ -6,9 +6,9 @@ import type { OverviewBridge } from '../../src/mcp';
 import { parseStudioAction } from '../../src/protocol';
 import { StudioSession } from '../../src/session';
 import { localServerUrl, modelFailure, overviewToolName } from '../../src/trueforge';
-import type { ApprovalEvent, Event, Forge } from '../../src/trueforge';
+import type { ApprovalEvent, Event, Forge, SessionAgent } from '../../src/trueforge';
 import type { QuickTools } from '../../src/mcp';
-import type { QuickEditTarget, Settings } from '../../src/session';
+import type { ArchivedConversation, QuickEditTarget, Settings } from '../../src/session';
 import { applyHunks, reviewTool } from '../../src/quickPatch';
 import type { ReviewReceipt } from '../../src/quickPatch';
 
@@ -37,7 +37,8 @@ test('provider limit classification preserves retry guidance and omits raw detai
   assert.doesNotMatch(modelFailure('429 nonsense synthetic-private-data').detail, /synthetic-private-data/);
 });
 
-function setup(overrides: Partial<Forge> = {}, edit?: (tools: QuickTools) => void, settings: Partial<Settings> = {}, streamIdleMs?: number) {
+function setup(overrides: Partial<Forge> = {}, edit?: (tools: QuickTools) => void, settings: Partial<Settings> = {}, streamIdleMs?: number,
+  store?: { scope: string; entries: ArchivedConversation[] }) {
   const calls: string[] = [];
   const decisions: ApprovalEvent[] = [];
   const bridge: OverviewBridge = {
@@ -61,6 +62,8 @@ function setup(overrides: Partial<Forge> = {}, edit?: (tools: QuickTools) => voi
     forge: () => forge,
     bridge: async (_signal, _name, _context, tools) => { if (tools) edit?.(tools); return bridge; },
     streamIdleMs,
+    scopeKey: store && (() => store.scope),
+    history: store && { load: () => store.entries, save: async (entries) => { store.entries = structuredClone(entries); } },
   });
   return { session, calls, decisions };
 }
@@ -77,6 +80,26 @@ test('invalid configured model requires an explicit selection even if only one m
   session.selectModel(model);
   await session.submit('test');
   assert.equal(session.state.phase, 'completed');
+});
+
+test('workspace history survives host reload with redacted text and no access from a different folder', async () => {
+  const store = { scope: 'workspace-a', entries: [] as ArchivedConversation[] };
+  const first = setup({}, undefined, {}, undefined, store).session;
+  await first.refresh();
+  await first.submit('Review this note\napi_key: "synthetic-private-value"');
+  const id = first.state.conversationId!;
+  await first.dispose();
+  const reloaded = setup({}, undefined, {}, undefined, store).session;
+  assert.equal(reloaded.state.history?.[0]?.id, id);
+  reloaded.openConversation(id);
+  assert.match(reloaded.state.messages[0]?.text ?? '', /Potential credential redacted/);
+  assert.doesNotMatch(JSON.stringify(store.entries), /synthetic-private-value/);
+  store.scope = 'workspace-b';
+  await reloaded.workspaceChanged();
+  reloaded.openConversation(id);
+  assert.deepEqual(reloaded.state.history, []);
+  assert.deepEqual(reloaded.state.messages, []);
+  await reloaded.dispose();
 });
 
 for (const [input, match] of [
@@ -222,7 +245,22 @@ test('a dropped stream rebuilds partial output from its cursor without starting 
   assert.deepEqual([starts, resumes, calls.filter((call) => call === 'session').length], [1, 1, 1]);
 });
 
-for (const mode of ['manual', 'fallback', 'secondary fails', 'secondary missing', 'model already active'] as const) {
+for (const [mode, primaryError, switches] of [
+  ['manual', '[Model Error] Request failed (503): unavailable', false],
+  ['503', '[Model Error] Request failed (503): unavailable', true],
+  ['429', '[Model Error] Request failed (429): rate limited', true],
+  ['502', '[Model Error] Request failed (502): bad gateway', true],
+  ['timeout', '[Model Error] Cannot connect to API: Headers Timeout Error', true],
+  ['connection refused', '[Model Error] Cannot connect to API: ECONNREFUSED', true],
+  ['secondary fails', '[Model Error] Request failed (503): unavailable', true],
+  ['secondary missing', '[Model Error] Request failed (503): unavailable', false],
+  ['disabled', '[Model Error] Request failed (503): unavailable', false],
+  ['model already active', '[Model Error] Request failed (503): unavailable', false],
+  ['invalid key', '[Model Error] Request failed (401): invalid API key, quota unavailable', false],
+  ['invalid model', '[Model Error] Request failed (404): model not found', false],
+  ['invalid arguments', '[Model Error] Request failed (400): invalid tool arguments, timeout=500', false],
+  ['MCP failure', '[MCP Error] Connection refused', false],
+] as const) {
   test(`model switching uses a fresh session with no replay of tools · ${mode}`, async () => {
     const starts: string[] = [];
     const models: string[] = [];
@@ -232,16 +270,18 @@ for (const mode of ['manual', 'fallback', 'secondary fails', 'secondary missing'
         models.push('spec' in agent ? agent.spec.model.name : '');
         return `session-${models.length}`;
       },
-      start: async function* (id, _prompt, _signal, previousTurnId) {
+      start: async function* (id, prompt, _signal, previousTurnId) {
         assert.equal(previousTurnId, undefined);
+        assert.equal(prompt, 'test');
         starts.push(id);
         if (id === 'session-2') assert.ok(calls.includes('remove'), 'primary connector must be retired');
         yield created;
+        if (mode === '503') yield { type: 'model.message', id: 'empty-start', threadId: 'main', createdAt };
         if (mode === 'model already active') yield source;
-        if (id === 'session-1' || mode === 'secondary fails') yield failure('503 unavailable');
+        if (id === 'session-1' || mode === 'secondary fails') yield failure(primaryError);
         else yield done;
       },
-    }, undefined, { secondaryModel: mode === 'manual' ? undefined : secondary });
+    }, undefined, { secondaryModel: mode === 'manual' ? undefined : secondary, automaticFallback: mode !== 'disabled' });
     await session.refresh();
     await session.submit('test');
     if (mode === 'manual') {
@@ -251,12 +291,12 @@ for (const mode of ['manual', 'fallback', 'secondary fails', 'secondary missing'
       assert.equal(session.state.connection.selectedModel, secondary);
       await session.submit('test');
     }
-    const switched = mode !== 'secondary missing' && mode !== 'model already active';
+    const switched = switches || mode === 'manual';
     assert.deepEqual(starts, switched ? ['session-1', 'session-2'] : ['session-1']);
     assert.deepEqual(models, switched ? [model, secondary] : [model]);
     assert.deepEqual(decisions, []);
-    assert.equal(session.state.phase, mode === 'manual' || mode === 'fallback' ? 'completed' : 'failed');
-    assert.equal(session.state.activity.some(({ label }) => label === 'Using configured secondary model'), mode === 'fallback' || mode === 'secondary fails');
+    assert.equal(session.state.phase, switched && mode !== 'secondary fails' ? 'completed' : 'failed');
+    assert.equal(session.state.activity.some(({ label }) => label === 'Using configured secondary model'), switches);
   });
 }
 
@@ -268,19 +308,55 @@ test('webview actions validate text and approval payloads', () => {
   assert.deepEqual(parseStudioAction({ type: 'decideApproval', id: 'id', allow: false }), { type: 'decideApproval', id: 'id', allow: false });
 });
 
-for (const mode of ['apply', 'discard', 'early cancel', 'stream cancel', 'staged cancel', 'pause cancel', 'missing receipt', 'stale', 'error after review'] as const) {
+test('Quick Edit uses the reasoning effort selected for each model from TrueForge capabilities', async () => {
+  const unsupported = 'fixture/default';
+  const agents: SessionAgent[] = [];
+  const { session } = setup({
+    check: async () => ({ version: 'fixture', models: [model, secondary, unsupported],
+      editReasoning: new Map([[model, 'high'], [secondary, 'medium']]) }),
+    createSession: async (agent) => { agents.push(agent); return 'session-1'; },
+  });
+  const target: QuickEditTarget = {
+    base: { path: 'example.ts', version: 1, text: 'original', start: 0, end: 8, eol: '\n' },
+    evidence: '{}', verify: async () => {}, preview: async () => {}, apply: async () => {},
+  };
+  await session.refresh();
+  await session.submit('Edit this selection', true, target);
+  await session.submit('Read-only chat');
+  session.selectModel(secondary);
+  await session.submit('Edit this selection', true, target);
+  session.selectModel(unsupported);
+  await session.submit('Edit this selection', true, target);
+  assert.deepEqual(agents.map((agent) => {
+    assert.ok('spec' in agent);
+    return agent.spec.model;
+  }), [
+    { name: model, params: { reasoningEffort: 'high' } },
+    { name: model },
+    { name: secondary, params: { reasoningEffort: 'medium' } },
+    { name: unsupported },
+  ]);
+  await session.dispose();
+});
+
+for (const mode of ['apply', 'corrected draft', 'unchecked review', 'superseded review', 'discard', 'early cancel', 'stream cancel',
+  'staged cancel', 'staged error', 'pause cancel', 'missing receipt', 'stale', 'error after review'] as const) {
   test(`Quick Edit state machine · ${mode}`, async () => {
     let tools: QuickTools | undefined;
     let proposalId = '';
     let receipt: ReviewReceipt | undefined;
     let transferred: ApprovalEvent | undefined;
     const original = 'one\nkeep\nthree\n';
+    const request = '  Edit the selected code.\nUpdate its documentation.  ';
+    const evidence = '{"selected":"fixture"}';
+    const received: string[] = [];
     let buffer = original;
     const base = { path: 'source.py', version: 1, text: original, start: 0, end: original.length, eol: '\n' as const };
     const requireTools = () => { assert.ok(tools); return tools; };
     const harness = setup({
       check: async () => ({ version: 'fixture', models: [model, secondary] }),
-      start: async function* () {
+      start: async function* (_sessionId, input) {
+        received.push(input);
         if (mode === 'early cancel') { await harness.session.cancel(); return; }
         yield created;
         if (mode === 'stream cancel') {
@@ -288,8 +364,28 @@ for (const mode of ['apply', 'discard', 'early cancel', 'stream cancel', 'staged
           await harness.session.cancel();
           return;
         }
-        proposalId = requireTools().stage('ONE\nkeep\nTHREE\n', 'Change two lines').id;
+        const draft = requireTools().stage('ONE\nkeep\nTHREE\n', 'Change two lines');
+        proposalId = draft.id;
         if (mode === 'staged cancel') { await harness.session.cancel(); return; }
+        if (mode === 'staged error') { yield failure('[Model Error] Request failed (503): overloaded'); return; }
+        if (mode !== 'unchecked review') {
+          const checks = [{ scenario: 'Keep the middle line', outcome: 'The middle line stays unchanged.',
+            documentation: { inputs: ['keep'], quote: 'keep' } }];
+          const replacesDraft = mode === 'corrected draft' || mode === 'superseded review';
+          const correction = replacesDraft ? { replacement: 'ONE\nkeep\nTHIRD\n', explanation: 'Correct the second change' } : undefined;
+          if (mode === 'corrected draft') {
+            assert.throws(() => requireTools().check({ proposalId, checks: [
+              { scenario: 'Keep the middle line', outcome: 'Unchanged', documentation: { inputs: ['middle'], quote: 'keep' } },
+            ], correction }), /specific input words/);
+          }
+          const checked = requireTools().check({ proposalId, checks, correction });
+          assert.throws(() => requireTools().check({ proposalId: checked.id, checks }), /current unchecked/);
+          if (replacesDraft) {
+            assert.notEqual(checked.id, draft.id);
+            assert.throws(() => draft.authorize(), /sealed/);
+          }
+          if (mode !== 'superseded review') proposalId = checked.id;
+        }
         yield { type: 'model.message', id: 'source', threadId: 'main', createdAt };
         yield { type: 'model.message.delta', id: 'source', threadId: 'main', toolCalls: [{ index: 0, id: 'tool', type: 'function',
           toolInfo: { type: 'mcp', name: reviewTool, serverName: 'connector', serverId: 'connector' },
@@ -305,12 +401,12 @@ for (const mode of ['apply', 'discard', 'early cancel', 'stream cancel', 'staged
       resume: async function* () {
         if (transferred) yield { ...transferred, id: 'approval', createdAt };
         if (receipt) yield { type: 'tool.response', id: 'receipt', threadId: 'main', toolCallId: 'tool', content: JSON.stringify(receipt), createdAt };
-        yield mode === 'error after review' ? failure('503 overloaded') : done;
+        yield mode === 'error after review' ? failure('[Model Error] Request failed (503): overloaded') : done;
       },
-    }, (value) => { tools = value; }, mode === 'error after review' ? { secondaryModel: secondary } : undefined);
+    }, (value) => { tools = value; }, { secondaryModel: secondary });
     const { session } = harness;
     let reviewId = '';
-    const target: QuickEditTarget = { base, evidence: '{"selected":"fixture"}', verify: async () => {
+    const target: QuickEditTarget = { base, evidence, verify: async () => {
       if (mode === 'stale' && reviewId) throw new Error('stale');
     }, preview: async () => { assert.equal(buffer, original); }, apply: async (hunks, _digest, _signal, commit) => {
       commit();
@@ -320,8 +416,8 @@ for (const mode of ['apply', 'discard', 'early cancel', 'stream cancel', 'staged
     const shown = new Promise<string>((resolve) => session.listen(() => {
       if (session.state.review) resolve(session.state.review.id);
     }));
-    const running = session.submit('Edit', true, target);
-    if (!['early cancel', 'stream cancel', 'staged cancel'].includes(mode)) {
+    const running = session.submit(request, true, target);
+    if (!['early cancel', 'stream cancel', 'staged cancel', 'staged error', 'unchecked review', 'superseded review'].includes(mode)) {
       reviewId = await shown;
       assert.throws(() => requireTools().receipt(proposalId), /authorization/);
       await session.decide('tool', true); // Overview controls cannot approve a patch.
@@ -337,9 +433,15 @@ for (const mode of ['apply', 'discard', 'early cancel', 'stream cancel', 'staged
       }
     }
     await running;
-    assert.equal(buffer, mode === 'apply' ? 'one\nkeep\nTHREE\n' : original);
+    assert.deepEqual(received, [`${request}\n\nCaptured selection (JSON evidence):\n${evidence}`]);
+    assert.equal(buffer, mode === 'apply' ? 'one\nkeep\nTHREE\n' : mode === 'corrected draft' ? 'one\nkeep\nTHIRD\n' : original);
     assert.equal(session.state.review, undefined);
-    if (mode === 'missing receipt' || mode === 'error after review') assert.equal(session.state.phase, 'failed');
+    if (mode === 'unchecked review' || mode === 'superseded review') {
+      assert.equal(session.state.phase, 'failed');
+      assert.match(session.state.error ?? '', /requires the exact checked proposal/);
+      assert.equal(transferred, undefined);
+    }
+    if (mode === 'missing receipt' || mode === 'staged error' || mode === 'error after review') assert.equal(session.state.phase, 'failed');
     if (mode === 'error after review') {
       assert.match(session.state.error ?? '', /temporarily unavailable/);
       assert.throws(() => requireTools().receipt(proposalId), /authorization/);
@@ -428,8 +530,18 @@ test('follow-ups reuse the session and chain from the completed turn until expli
   assert.deepEqual(starts, [['session-1', undefined], ['session-1', 'turn-1']]);
   assert.equal(calls.filter((call) => call === 'session').length, 1);
   assert.equal(calls.filter((call) => call === 'remove').length, 2);
+  const firstId = session.state.conversationId!;
   session.clear();
+  assert.deepEqual(session.state.history, [{ id: firstId, title: 'first' }]);
+  assert.deepEqual(session.state.messages, []);
+  assert.equal(session.state.sessionId, undefined);
   await session.submit('new conversation');
+  assert.equal(calls.filter((call) => call === 'session').length, 2);
+  session.openConversation(firstId);
+  assert.deepEqual(session.state.messages.map(({ text }) => text), ['first', 'follow up']);
+  assert.equal(session.state.history?.[0]?.title, 'new conversation');
+  await session.submit('resume first conversation');
+  assert.deepEqual(starts.at(-1), ['session-1', 'turn-1']);
   assert.equal(calls.filter((call) => call === 'session').length, 2);
   await session.dispose();
 });

@@ -73,6 +73,7 @@ select, textarea { width: 100%; }
 .composer textarea { resize: vertical; min-height: 46px; max-height: 25dvh; padding: 7px 9px; }
 .composer textarea::placeholder { color: var(--vscode-input-placeholderForeground); }
 .composer-footer { margin-top: 3px; flex-wrap: wrap; }
+.history-control { flex: 1 1 100%; min-width: 0; }
 .composer-context { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; }
 .composer-context label { font-size: .87rem; }
 .composer-context input { vertical-align: middle; accent-color: var(--accent); }

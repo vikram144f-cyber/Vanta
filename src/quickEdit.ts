@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { basename } from 'node:path';
-import { estimateContext } from './context';
 import { workspaceRepository, workspaceScope } from './editorRepository';
+import { quickEditEvidence } from './quickContext';
 import { applyHunks, assertBase, fingerprint } from './quickPatch';
 import type { BaseSelection, Hunk } from './quickPatch';
 import { maxFileBytes, normalizeWorkspacePath, Repository } from './repository';
@@ -88,26 +88,10 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
     };
     const start = document.positionAt(base.start);
     const end = document.positionAt(base.end);
-    const before = document.lineAt(Math.max(0, start.line - 10)).range.start;
-    const after = document.lineAt(Math.min(document.lineCount - 1, end.line + 10)).range.end;
-    const decoded = document.getText().split(/\r\n|\n/);
     const editorSource = await repo.read(path, deadline);
-    const redact = (first: number, last: number) => editorSource.lines.slice(first, last + 1)
-      .map((line, index) => line !== decoded[first + index]);
-    const lastSelected = end.character === 0 ? end.line - 1 : end.line;
-    if (redact(start.line, lastSelected).some(Boolean)) {
-      throw new VantaError('The selected region includes unsupported text or a potential credential.');
-    }
-    const surrounding = {
-      before: redact(before.line, start.line).some(Boolean) ? '' : document.getText(new vscode.Range(before, start)),
-      after: redact(end.line, after.line).some(Boolean) ? '' : document.getText(new vscode.Range(end, after)),
-    };
     const symbols = await repo.providerSymbols('', path, deadline);
-    const evidence = JSON.stringify({ path, language: document.languageId,
-      range: { start: { line: start.line + 1, column: start.character + 1 }, end: { line: end.line + 1, column: end.character + 1 } },
-      selected: base.text.slice(base.start, base.end), ...surrounding,
-      symbols: symbols.filter((symbol) => symbol.start <= end.line + 1 && symbol.end >= start.line + 1).slice(0, 8) });
-    if (estimateContext(evidence) > Math.floor(this.contextBudget() / 2)) throw new VantaError('Select a smaller region to fit the Quick Edit context budget.');
+    const range = { start: { line: start.line + 1, column: start.character + 1 }, end: { line: end.line + 1, column: end.character + 1 } };
+    const evidence = quickEditEvidence(base, document.languageId, range, editorSource.lines, symbols, Math.floor(this.contextBudget() / 2));
     await verify(deadline);
     return { base, evidence, verify, preview: (patch, hunk) => this.previewChanges(patch.id, patch, hunk, 'Quick Edit'),
       apply: async (hunks, digest, signal, beginCommit) => {
@@ -181,7 +165,7 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
         this.session.selectModel(model);
       }
       void vscode.commands.executeCommand('vanta.studio.focus');
-      await this.session.submit(instruction.trim(), true, target);
+      await this.session.submit(instruction, true, target);
     } catch (error) { void vscode.window.showWarningMessage(safeError(error)); }
     finally { this.#inputOpen = false; }
   }

@@ -36,10 +36,12 @@ export interface StudioState {
   messages: Message[];
   activity: Activity[];
   phase: Phase;
+  conversationId?: string;
+  history?: { id: string; title: string }[];
   sessionId?: string;
   activeModel?: string;
   retry?: { prompt: string; shareContext: boolean; agentMode: boolean };
-  revision?: { id: string; needsFeedback: boolean };
+  revision?: { id: string };
   approval?: Approval;
   error?: string;
   context?: ContextReport[];
@@ -47,17 +49,19 @@ export interface StudioState {
   agentMode?: boolean;
   changes?: { paths: string[]; status: 'applied' | 'undone' };
   verification?: { command: string; status: 'awaiting approval' | 'running' | 'passed' | 'failed' | 'timed out' | 'cancelled' | 'denied'; exitCode?: number | null; output?: string };
-  review?: { id: string; path: string; explanation: string; current: number; blocked?: string;
+  review?: { id: string; path: string; explanation: string; current: number; blocked?: string; canRevise?: boolean;
     hunks: HunkSummary[]; files?: { path: string; summary: string; hunks: HunkSummary[] }[] };
 }
 
 export type StudioAction =
   | { type: 'ready' | 'refreshConnection' | 'cancelRun' | 'clearConversation' | 'pickReference' | 'undoAgent' }
   | { type: 'submitPrompt'; text: string; shareContext?: boolean; agentMode?: boolean }
+  | { type: 'openConversation'; id: string }
   | { type: 'selectModel'; model: string }
   | { type: 'openContext'; path: string; line: number }
   | { type: 'reviewHunk'; id: string; hunk: number; decision: 'accepted' | 'rejected' | 'view' }
   | { type: 'finishReview'; id: string; apply: boolean }
+  | { type: 'rejectAndRevise'; id: string; diagnostic: string }
   | { type: 'reviseProposal'; id: string; diagnostic: string }
   | { type: 'rejectRemaining'; id: string }
   | { type: 'decideApproval'; id: string; allow: boolean };
@@ -78,6 +82,11 @@ export function parseStudioAction(value: unknown): StudioAction | undefined {
       if ('text' in value && typeof value.text === 'string' && value.text.length <= 12_000 && value.text.trim()) {
         return { type: value.type, text: value.text.trim(), ...('shareContext' in value && value.shareContext === true ? { shareContext: true } : {}),
           ...('agentMode' in value && value.agentMode === true ? { agentMode: true } : {}) };
+      }
+      return;
+    case 'openConversation':
+      if ('id' in value && typeof value.id === 'string' && /^[a-f0-9-]{36}$/.test(value.id)) {
+        return { type: value.type, id: value.id };
       }
       return;
     case 'openContext':
@@ -108,6 +117,7 @@ export function parseStudioAction(value: unknown): StudioAction | undefined {
         return { type: value.type, id: value.id, apply: value.apply };
       }
       return;
+    case 'rejectAndRevise':
     case 'reviseProposal':
       if ('id' in value && typeof value.id === 'string' && value.id.length === 36
         && 'diagnostic' in value && typeof value.diagnostic === 'string' && value.diagnostic.length <= 4000) {

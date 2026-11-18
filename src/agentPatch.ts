@@ -21,6 +21,45 @@ export interface StagedFile { base: BaseSelection; summary: string; hunks: Hunk[
 export interface ApprovedFile { base: BaseSelection; after: string; ids: number[] }
 export interface AgentReceipt extends ReviewReference { digest: string; files: string[] }
 
+function rstSections(source: string) {
+  const lines = source.split(/\r?\n/);
+  const styles: string[] = [];
+  const parents: { key: string; level: number }[] = [];
+  const sections = new Map<string, { title: string; parent?: string; line: number } | undefined>();
+  const adornment = (line: string | undefined) => /^([=~^+*"'`:#\-])\1{2,}$/.test(line?.trimEnd() ?? '') ? line!.trimEnd()[0] : undefined;
+  for (let index = 0; index < lines.length - 1; index++) {
+    const title = lines[index]?.trimEnd();
+    const underline = adornment(lines[index + 1]);
+    if (!title || /^\s|^\.\./.test(title) || !/[\p{L}\p{N}]/u.test(title) || !underline) continue;
+    const overline = adornment(lines[index - 1]) === underline;
+    if (lines[index - (overline ? 2 : 1)]?.trim()) continue;
+    if (lines[index + 1]!.trimEnd().length < title.length) continue;
+    const style = underline + (overline ? 'overline' : '');
+    if (!styles.includes(style)) styles.push(style);
+    const level = styles.indexOf(style);
+    const key = style + ' ' + title;
+    while ((parents.at(-1)?.level ?? -1) >= level) parents.pop();
+    sections.set(key, sections.has(key) ? undefined : { title, parent: parents.at(-1)?.key, line: index + 1 });
+    parents.push({ key, level });
+    index++;
+  }
+  return sections;
+}
+
+function assertRstSectionPlacement(path: string, before: string, after: string) {
+  if (!path.toLowerCase().endsWith('.rst')) return;
+  const original = rstSections(before);
+  const proposed = rstSections(after);
+  for (const [key, heading] of original) {
+    const next = proposed.get(key);
+    // An inserted section should not adopt a heading carried over from another section.
+    if (!heading || !next?.parent || next.parent === heading.parent || original.has(next.parent)
+      || (heading.parent && !proposed.has(heading.parent))) continue;
+    const parent = proposed.get(next.parent);
+    if (parent) throw new VantaError(`The new documentation section at proposed line ${parent.line} would contain the existing section "${heading.title}" (line ${heading.line}). Insert the new section at a complete peer-section boundary so existing subsections keep their parent.`);
+  }
+}
+
 export class AgentPatch {
   readonly id = randomUUID();
   readonly files = new Map<string, StagedFile>();
@@ -32,6 +71,16 @@ export class AgentPatch {
   get reference(): ReviewReference { return { proposalId: this.id, revision: this.files.size }; }
 
   stage(base: BaseSelection, proposal: FileProposal) {
+    return this.#commit(this.#prepare(base, proposal));
+  }
+
+  async stageValidated(base: BaseSelection, proposal: FileProposal, validate: (file: StagedFile) => Promise<void>) {
+    const file = this.#prepare(base, proposal);
+    await validate(file);
+    return this.#commit(file);
+  }
+
+  #prepare(base: BaseSelection, proposal: FileProposal): StagedFile {
     if (this.#closed || this.#grant || this.files.size >= 12 || this.files.has(proposal.path)) {
       throw new VantaError('This proposal is sealed or the file was already staged. Stage all edits for a file in one call.');
     }
@@ -49,11 +98,20 @@ export class AgentPatch {
     }).sort((a, b) => a.start - b.start);
     const after = applyHunks(base, edits);
     if (Buffer.byteLength(after) > maxFileBytes) throw new VantaError('The proposed file exceeds 96 KiB.');
+    assertRstSectionPlacement(base.path, base.text, after);
     const hunks = createHunks(base, after);
+    return { base, summary: proposal.summary, hunks };
+  }
+
+  #commit(file: StagedFile) {
+    const { base, hunks } = file;
+    if (this.#closed || this.#grant || this.files.size >= 12 || this.files.has(base.path)) {
+      throw new VantaError('This proposal is sealed or the file was already staged. Stage all edits for a file in one call.');
+    }
     if (this.#hunks + hunks.length > 60) throw new VantaError('The proposal has more than 60 hunks. Narrow the task.');
     for (const hunk of hunks) hunk.id = ++this.#hunks;
-    this.files.set(proposal.path, { base, summary: proposal.summary, hunks });
-    return { ...this.reference, path: proposal.path, hunks: hunks.length, baseFingerprint: fingerprint(base.text) };
+    this.files.set(base.path, file);
+    return { ...this.reference, path: base.path, hunks: hunks.length, baseFingerprint: fingerprint(base.text) };
   }
 
   matches(reference: ReviewReference | undefined) {
@@ -69,6 +127,7 @@ export class AgentPatch {
       const accepted = hunks.filter((hunk) => hunk.status === 'accepted');
       if (!accepted.length) continue;
       const after = applyHunks(base, accepted);
+      assertRstSectionPlacement(path, base.text, after);
       const ids = accepted.map((hunk) => hunk.id);
       files.push({ base, after, ids });
       operation.push([path, base.version, fingerprint(base.text), fingerprint(after), ids]);

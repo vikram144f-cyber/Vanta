@@ -11,12 +11,25 @@ import { StudioSession } from '../../src/session';
 import { agentModeDefinition } from '../../src/trueforge';
 import type { AgentTools } from '../../src/mcp';
 import type { ApprovalEvent, Event, Forge } from '../../src/trueforge';
-import { checkPythonSyntax, runPytest, verificationTarget } from '../../src/verification';
+import { checkPythonSyntax, runPytest, validatePythonStaging, verificationTarget } from '../../src/verification';
 import type { BaseSelection } from '../../src/quickPatch';
 
 const base = (path: string, text = 'old\nuntouched\nold end\n'): BaseSelection =>
   ({ path, text, start: 0, end: text.length, version: 1, eol: '\n' });
 const binding = { call: 'call', turn: 'turn', session: 'session', workspace: 'workspace' };
+
+test('a new reStructuredText section preserves existing subsection parents', () => {
+  const path = 'docs/guide.rst';
+  const original = 'Guide\n=====\n\nUsage\n-----\n\nExample text.\n\nOptions\n~~~~~~~\n\nExisting options.\n\nNext section\n------------\n';
+  const newSection = 'New feature\n-----------\n\nDocumentation text.\n\n';
+  const patch = new AgentPatch();
+  const insert = (old: string) => patch.stage(base(path, original), {
+    path, summary: 'Document a feature', edits: [{ old, replacement: newSection + old }],
+  });
+  assert.throws(() => insert('Options\n~~~~~~~'), /would contain the existing section "Options"/);
+  assert.equal(patch.reference.revision, 0);
+  assert.equal(insert('Next section\n------------').hunks, 1);
+});
 
 test('Agent Mode exposes its first context call and preserves deferred tools and approvals', () => {
   const definition = agentModeDefinition('test/model', 'test-mcp', {
@@ -111,12 +124,64 @@ test('batch failure compensates an earlier write and preserves a divergent buffe
 });
 
 const python = process.env.VANTA_TEST_PYTHON;
+const ruff = process.env.VANTA_TEST_RUFF;
 
-for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial', 'revision failure', 'revision cancellation', 'rejected staging loop', 'invalid syntax', 'deny', 'cancel', 'failed test', 'interrupted', 'forged'] as const) {
+test('approved verification copies explicitly configured hidden fixtures without exposing them to repository reads', { skip: !python }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vanta-verification-fixtures-'));
+  try {
+    const fixture = join(root, '.test-input');
+    await writeFile(fixture, 'synthetic');
+    await writeFile(join(root, '.unlisted'), 'synthetic');
+    const target = 'test_fixture.py';
+    const code = 'from pathlib import Path\n\ndef test_fixture():\n    folder = Path(__file__).parent\n    assert (folder / ".test-input").read_text() == "synthetic"\n    assert not (folder / ".unlisted").exists()\n';
+    await writeFile(join(root, target), code);
+    const repo = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
+    const signal = AbortSignal.timeout(20_000);
+    await assert.rejects(repo.diskText('.test-input', signal), /workspace policy/);
+    assert.throws(() => repo.verificationFixtures([join(root, '.git', 'config')]), /workspace file policy/);
+    assert.deepEqual(repo.verificationFixtures([join(tmpdir(), '.data'), fixture, fixture]), ['.test-input']);
+    const withoutFixture = await runPytest(repo, python!, target, [], signal);
+    assert.equal(withoutFixture.status, 'failed');
+    const withFixture = await runPytest(repo, python!, target, [], signal, { fixtures: repo.verificationFixtures([fixture]) });
+    assert.equal(withFixture.status, 'passed', withFixture.output);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('Agent Mode rejects a new Python declaration inside an existing body and can restage at its boundary', { skip: !python }, async () => {
+  const patch = new AgentPatch();
+  const file = base('app.py', '@decorate\ndef original():\n    start()\n    finish()\n\ndef next_function():\n    pass\n');
+  const revision = (old: string, replacement: string) => ({ path: file.path, summary: 'Add a function', edits: [{ old, replacement }] });
+  const verify = (staged: Parameters<typeof validatePythonStaging>[1]) => validatePythonStaging(python!, staged, new AbortController().signal);
+  const addition = 'def added():\n    run()\n\n';
+  await assert.rejects(patch.stageValidated(file, revision('    finish()\n', `\n${addition}    finish()\n`), verify), /original line 4.*after line 4/);
+  assert.equal(patch.reference.revision, 0);
+  await patch.stageValidated(file, revision('def next_function():', `${addition}def next_function():`), verify);
+  assert.equal(patch.reference.revision, 1);
+});
+
+test('Ruff staging returns new undefined names, preserves baseline findings, and allows a corrected edit', { skip: !python || !ruff }, async () => {
+  const patch = new AgentPatch();
+  const source = 'def existing():\r\n    return legacy_value\r\n\r\ndef calculate(values):\r\n    return values[0]\r\n';
+  const file = { ...base('calculation.py', source), eol: '\r\n' as const };
+  const proposal = { path: file.path, summary: 'Return the arithmetic mean',
+    edits: [{ old: 'return values[0]', replacement: 'return stats.mean(values)' }] };
+  const verify = (staged: Parameters<typeof validatePythonStaging>[1]) => validatePythonStaging(python!, staged, new AbortController().signal, ruff);
+  await assert.rejects(patch.stageValidated(file, proposal, verify), (error: Error) => {
+    assert.match(error.message, /Proposed line 5:\d+: F821 Undefined name [`']stats[`']/);
+    assert.doesNotMatch(error.message, /legacy_value/);
+    return true;
+  });
+  assert.equal(patch.reference.revision, 0);
+  await patch.stageValidated(file, { ...proposal,
+    edits: [{ old: 'def existing():', replacement: 'import statistics as stats\n\n\ndef existing():' }, ...proposal.edits] }, verify);
+  assert.equal(patch.reference.revision, 1);
+});
+
+for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject and revise', 'revision failure', 'revision without proposal', 'revision cancellation', 'rejected staging loop', 'invalid syntax', 'deny', 'cancel', 'failed test', 'interrupted', 'forged'] as const) {
   test(`Agent Mode patch and verification gates · ${verdict}`, { skip: !python, timeout: 15_000 }, async () => {
     assert.ok(python);
     const path = 'test_fixture.py';
-    const source = 'def test_fixture():\n    assert True\n';
+    const source = 'def test_fixture():\n    assert True\n\n\ndef test_other():\n    assert 2 == 2\n';
     const root = await mkdtemp(join(tmpdir(), 'vanta-agent-gates-'));
     await writeFile(join(root, path), source);
     const repo = await Repository.bind({ path: root, isAvailable: () => true }, { ripgrep: false });
@@ -125,7 +190,6 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial'
     let last: ApprovalEvent;
     let writes = 0;
     let nextFails = false;
-    let repeatReview: boolean = verdict === 'repeat after denial';
     let cancellations = 0;
     let captures = 0;
     let sessions = 0;
@@ -145,13 +209,23 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial'
     const response = (toolCallId: string, payload: unknown): Event => ({ type: 'tool.response', id: toolCallId + '-result',
       createdAt, threadId: 'main', toolCallId, content: JSON.stringify(payload) });
     const session = new StudioSession({
-      settings: () => ({ serverUrl: 'http://localhost:8790', agentName: '', model: 'fixture', workspaceOverview: true, verificationPython: python }),
+      settings: () => ({ serverUrl: 'http://localhost:8790', agentName: '', model: 'fixture', secondaryModel: 'backup', workspaceOverview: true, verificationPython: python }),
       forge: (): Forge => ({
-        check: async () => ({ version: 'fixture', models: ['fixture'] }),
-        createSession: async () => `fixture-session-${++sessions}`,
+        check: async () => ({ version: 'fixture', models: ['fixture', 'backup'], editReasoning: new Map([['fixture', 'high']]) }),
+        createSession: async (agent) => {
+          assert.ok('spec' in agent);
+          assert.deepEqual(agent.spec.model, verdict === 'fallback' && sessions === 1 ? { name: 'backup' }
+            : { name: 'fixture', params: { reasoningEffort: 'high' } });
+          return `fixture-session-${++sessions}`;
+        },
         start: async function* (_session, input) {
           inputs.push(input);
           yield { type: 'turn.created', id: 'turn', turnId: 'turn', previousTurnId: null, createdAt, threadId: null, state: { status: 'running' } };
+          if (verdict === 'fallback' && inputs.length === 1) {
+            yield { type: 'turn.done', id: 'failure', createdAt, threadId: null,
+              state: { status: 'error', message: '[Model Error] Request failed (503): unavailable', completedAt: createdAt } };
+            return;
+          }
           if (cancelNext) {
             await session.cancel();
             return;
@@ -160,7 +234,12 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial'
             yield { type: 'turn.done', id: 'failure', createdAt, threadId: null, state: { status: 'error', message: '503 unavailable', completedAt: createdAt } };
             return;
           }
-          if (verdict === 'allow' || verdict === 'rejected staging loop') {
+          if (verdict === 'revision without proposal' && inputs.length === 2) {
+            yield { type: 'turn.done', id: 'done', createdAt, threadId: null,
+              state: { status: 'done', completedAt: createdAt, output: null, requiredActions: [] } };
+            return;
+          }
+          if (verdict === 'allow' || verdict === 'rejected staging loop' || (verdict === 'reject and revise' && inputs.length === 1)) {
             const bad = { path, summary: 'Invalid anchor', edits: [{ old: 'assert True\\n', replacement: 'assert 1 == 1' }] };
             await assert.rejects(tools.stage(bad), /missing an exact anchor/);
             await assert.rejects(tools.stage({ ...bad, summary: 'Same edit' }), /already rejected:.*Change the anchor/);
@@ -170,9 +249,10 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial'
               return;
             }
           }
-          const { proposalId, revision } = await tools.stage({ path, summary: 'Add an assertion',
-            edits: [{ old: '    assert True', replacement: verdict === 'invalid syntax' ? 'assert True\n    return'
-            : verdict === 'failed test' && inputs.length === 1 ? '    assert False' : '    assert 1 == 1' }] }) as typeof reference;
+          const edits = [{ old: '    assert True', replacement: verdict === 'invalid syntax' && inputs.length === 1 ? 'assert True\n    return'
+            : verdict === 'failed test' && inputs.length === 1 ? '    assert False' : '    assert 1 == 1' }];
+          if (verdict === 'reject and revise' && inputs.length === 1) edits.push({ old: '    assert 2 == 2', replacement: '    assert False' });
+          const { proposalId, revision } = await tools.stage({ path, summary: 'Add an assertion', edits }) as typeof reference;
           reference = { proposalId, revision };
           yield* pause('review_changes', reference);
         },
@@ -184,14 +264,7 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial'
             // Reconnect may replay the original pause. The recorded trace then used a new call ID for the same revision.
             yield { type: 'tool.approval_required', id: 'review-replay', createdAt, threadId: 'main',
               toolCalls: [{ id: last.toolCallId, sourceEventId: 'review_changes' }] };
-            if (repeatReview) {
-              repeatReview = false;
-              yield* pause('review_changes', reference, 'repeat-review');
-              yield { type: 'turn.update', id: 'paused-again', createdAt, threadId: null, state: { status: 'paused' } };
-              yield { type: 'turn.done', id: 'cancelled', createdAt, threadId: null,
-                state: { status: 'cancelled', completedAt: createdAt, reason: 'client-cancelled' } };
-              return;
-            }
+            assert.fail('Discard should stop the original stream rather than resume after denial');
           }
           if (last.toolCallId === 'review_changes' && last.approval.status === 'allow') {
             yield response('review_changes', tools.review(reference));
@@ -200,6 +273,7 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial'
           }
           if (last.approval.status === 'allow') yield response('run_verification',
             verdict === 'forged' ? { status: 'passed', exitCode: 0 } : await tools.verify(path));
+          if (verdict === 'failed test' && inputs.length === 1) assert.fail('The failed receipt should end the stream before more model calls');
           if (verdict === 'interrupted') return;
           yield { type: 'turn.done', id: 'done', createdAt, threadId: null,
             state: { status: 'done', completedAt: createdAt, output: null, requiredActions: [] } };
@@ -258,61 +332,51 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial'
         assert.equal(approved.length, 0);
         assert.equal(session.state.verification, undefined);
       } else assert.equal(shown.blocked, undefined);
-      if (verdict === 'deny review' || verdict === 'repeat after denial' || verdict === 'invalid syntax'
-        || verdict === 'revision failure' || verdict === 'revision cancellation') {
-        await Promise.all([session.finishReview(shown.id, false), session.finishReview(shown.id, false),
-          session.finishReview(shown.id, true), session.decide('repeat-review', true)]);
-        await run;
+      if (verdict === 'deny review' || verdict === 'reject and revise' || verdict === 'invalid syntax'
+        || verdict === 'revision failure' || verdict === 'revision without proposal' || verdict === 'revision cancellation') {
+        if (verdict === 'reject and revise') {
+          await session.reviewHunk(shown.id, shown.hunks[0]!.id, 'accepted');
+          await session.reviewHunk(shown.id, shown.hunks[1]!.id, 'rejected');
+        }
+        const revisedReview = when(() => session.state.review?.id !== shown.id ? session.state.review : undefined);
+        nextFails = verdict === 'revision failure';
+        cancelNext = verdict === 'revision cancellation';
+        const feedback = verdict === 'deny review' ? undefined : verdict === 'reject and revise' ? 'Keep the first assertion.' : '';
+        await Promise.all([session.finishReview(shown.id, false, feedback), session.finishReview(shown.id, false, feedback),
+          session.finishReview(shown.id, true)]);
         assert.deepEqual(approved, ['deny']);
         assert.equal(decisions[0]?.toolCallId, 'review_changes');
         assert.equal(decisions[0]?.threadId, 'main');
-        const discarded = session.state;
-        assert.equal(discarded.error, undefined);
-        assert.equal(discarded.review, undefined);
-        assert.equal(discarded.approval, undefined);
-        assert.ok(session.state.activity.some(({ label }) => label === 'Agent changes discarded'));
-        assert.equal(session.state.phase, verdict === 'repeat after denial' ? 'cancelled' : 'completed');
-        assert.equal(cancellations, verdict === 'repeat after denial' ? 1 : 0);
-        assert.equal(discarded.revision?.id, shown.id);
-        assert.equal(discarded.revision?.needsFeedback, verdict !== 'invalid syntax');
-        if (verdict === 'revision failure' || verdict === 'revision cancellation') {
-          const feedback = 'The output violates the contract.';
-          workspace = join(root, 'different-workspace');
-          await session.reviseProposal(shown.id, feedback);
-          assert.deepEqual(inputs, ['Change the test']);
-          workspace = root;
-          nextFails = verdict === 'revision failure';
-          cancelNext = verdict === 'revision cancellation';
-          await session.reviseProposal(shown.id, feedback);
-          assert.equal(inputs.length, 2);
-          assert.equal(sessions, 2);
-          assert.equal(session.state.phase, nextFails ? 'failed' : 'cancelled');
-          assert.equal(session.state.revision, undefined);
-          assert.deepEqual(approved, ['deny']);
-        }
-        if (verdict === 'repeat after denial') {
-          await session.reviseProposal(shown.id, '');
-          await session.reviseProposal('stale', 'The checker rejected the staged output.');
-          assert.deepEqual(inputs, ['Change the test']);
-          const nextReview = when(() => session.state.review);
-          const feedback = 'The checker rejected the staged output.';
-          const nextRun = session.reviseProposal(shown.id, feedback);
-          await session.reviseProposal(shown.id, feedback);
-          const next = await nextReview;
+        if (verdict === 'reject and revise' || verdict === 'invalid syntax') {
+          const next = await revisedReview;
           assert.notEqual(next.id, shown.id);
-          assert.equal(inputs.length, 2);
-          assert.match(inputs[1]!, /Change the test\n\nRevise the failed proposal/);
-          assert.ok(inputs[1]?.includes(feedback));
-          assert.ok(inputs[1]?.includes('assert 1 == 1'));
-          await session.finishReview(shown.id, false);
+          assert.equal(next.canRevise, false);
+          await session.finishReview(shown.id, true);
           assert.equal(session.state.review?.id, next.id);
           assert.deepEqual(approved, ['deny']);
+          assert.equal(writes, 0);
           await session.finishReview(next.id, false);
-          await nextRun;
-          assert.deepEqual(approved, ['deny', 'deny']);
-          assert.equal(session.state.phase, 'completed');
-          assert.equal(session.state.revision, undefined);
-          assert.equal(cancellations, 1);
+        }
+        await run;
+        assert.equal(inputs.length, verdict === 'deny review' ? 1 : 2);
+        assert.equal(sessions, inputs.length);
+        assert.equal(session.state.phase, nextFails || verdict === 'revision without proposal' ? 'failed' : 'cancelled');
+        assert.equal(session.state.revision, undefined);
+        assert.ok(session.state.activity.some(({ label }) => label === 'Agent changes discarded'));
+        assert.deepEqual(session.state.messages.filter((message) => message.role === 'user').map(({ text }) => text), ['Change the test']);
+        if (verdict === 'revision without proposal') assert.match(session.state.error ?? '', /without a new proposal for native review/);
+        if (verdict === 'reject and revise') {
+          assert.match(inputs[1]!, /Change the test\n\nRevise the failed proposal/);
+          const evidence = JSON.parse(inputs[1]!.split('\n').at(-1)!);
+          assert.deepEqual(evidence.proposal[0].edits.map(({ id, status }: { id: number; status: string }) => [id, status]), [[1, 'accepted'], [2, 'rejected']]);
+          assert.match(evidence.proposal[0].edits[0].sourceBefore, /def test_fixture/);
+          assert.match(evidence.stagingDiagnostics[0], /missing an exact anchor/);
+          assert.equal(evidence.userFeedback, feedback);
+        }
+        if (verdict === 'invalid syntax') assert.match(inputs[1]!, /IndentationError/);
+        if (verdict === 'revision failure' || verdict === 'revision without proposal' || verdict === 'revision cancellation') {
+          assert.match(inputs[1]!, /user rejected the proposal/);
+          assert.deepEqual(approved, ['deny']);
         }
         assert.equal(writes, 0);
         assert.equal(await readFile(join(root, path), 'utf8'), source);
@@ -326,15 +390,29 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial'
       if (verdict === 'cancel') await session.cancel();
       else await session.decide(command.id, verdict !== 'deny');
       await run;
-      assert.equal(writes, verdict === 'allow' || verdict === 'deferred' ? 1 : 0);
+      const applies = verdict === 'allow' || verdict === 'deferred' || verdict === 'fallback';
+      assert.equal(writes, applies ? 1 : 0);
       assert.deepEqual(approved, verdict === 'cancel' ? ['allow'] : ['allow', verdict === 'deny' ? 'deny' : 'allow']);
-      if (verdict === 'allow' || verdict === 'deferred') assert.equal(session.state.verification?.status, 'passed');
+      if (applies) assert.equal(session.state.verification?.status, 'passed');
+      if (verdict === 'fallback') {
+        assert.deepEqual(inputs, ['Change the test', 'Change the test']);
+        assert.equal(sessions, 2);
+        assert.equal(captures, 1);
+        assert.equal(session.state.phase, 'completed');
+      }
       if (verdict === 'deny') assert.equal(session.state.verification?.status, 'denied');
       if (verdict === 'cancel') assert.equal(session.state.phase, 'cancelled');
       if (verdict === 'failed test') {
+        assert.equal(session.state.phase, 'failed');
+        assert.equal(cancellations, 1);
+        assert.match(session.state.error ?? '', /approved tests failed/);
         assert.equal(session.state.verification?.exitCode, 1);
-        assert.deepEqual(session.state.revision, { id: shown.id, needsFeedback: true });
+        assert.deepEqual(session.state.revision, { id: shown.id });
         assert.equal(await readFile(join(root, path), 'utf8'), source);
+        workspace = join(root, 'different-workspace');
+        await session.reviseProposal(shown.id, 'Stale workspace.');
+        assert.equal(inputs.length, 1);
+        workspace = root;
         const freshReview = when(() => session.state.review);
         const freshVerification = when(() => session.state.approval);
         const correction = session.reviseProposal(shown.id, 'The generated assertion is always false.');
@@ -342,6 +420,7 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial'
         assert.notEqual(revised.id, shown.id);
         assert.equal(sessions, 2);
         assert.match(inputs[1]!, /failed, exit 1/);
+        assert.match(inputs[1]!, /"failedTests":\["test_fixture"\]/);
         assert.match(inputs[1]!, /assert False/);
         await session.finishReview(shown.id, true);
         assert.deepEqual(approved, ['allow', 'allow']);
@@ -359,6 +438,17 @@ for (const verdict of ['allow', 'deferred', 'deny review', 'repeat after denial'
       }
       if (verdict === 'forged' || verdict === 'interrupted') assert.equal(session.state.phase, 'failed');
       if (verdict === 'allow') {
+        const firstId = session.state.conversationId!;
+        const verificationResult = session.state.verification;
+        session.clear();
+        assert.equal(session.state.verification, undefined);
+        assert.equal(session.state.sessionId, undefined);
+        assert.deepEqual(session.state.messages, []);
+        session.openConversation(firstId);
+        assert.deepEqual(session.state.verification, { ...verificationResult,
+          output: verificationResult?.output?.replace(/\r\n/g, '\n') });
+        assert.equal(session.state.review, undefined);
+        assert.equal(session.state.approval, undefined);
         nextFails = true;
         await session.submit('Follow-up change', true, undefined, true);
         assert.equal(session.state.phase, 'failed');
@@ -413,7 +503,7 @@ test('pytest verifies the overlay, bounds output, and stops the Windows process 
     assert.equal(cancelled.status, 'cancelled', cancelled.output);
     await sleep(4200);
     await assert.rejects(access(escaped));
-    const timedOut = await runPytest(repo, python, target, [], new AbortController().signal, 50);
+    const timedOut = await runPytest(repo, python, target, [], new AbortController().signal, { timeout: 50 });
     assert.equal(timedOut.status, 'timed out');
     assert.deepEqual(await snapshots(), before);
     await rm(join(root, 'calc.py'));
