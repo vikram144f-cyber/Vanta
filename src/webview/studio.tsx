@@ -75,6 +75,8 @@ function Studio() {
       <div className="brand-row">
         <span className="brand">VANTA</span>
         <span className={`connection ${connection.status}`} role="status"><span aria-hidden="true" />{titles[connection.status]}</span>
+        {!busy && phase !== 'idle' && (state.quickEdit || state.agentMode) &&
+          <button className="subtle" type="button" onClick={() => host.postMessage({ type: 'openProofTrail' })}>ProofTrail</button>}
       </div>
       <div className="model-row">
         {connection.agentName ? <span className="agent-name" title={connection.agentName}>{connection.agentName}</span>

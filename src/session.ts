@@ -3,6 +3,7 @@ import { mergeEventDelta } from '@truefoundry/trueforge-sdk';
 import { randomUUID } from 'node:crypto';
 import type { AgentTools, OverviewBridge, QuickTools } from './mcp';
 import { isBusy } from './protocol';
+import { ProofTrail } from './proofTrail';
 import type { StudioState } from './protocol';
 import { agentModeDefinition, inlineAgent, isFallbackFailure, LoopbackConnectorBlocked, modelFailure, overviewToolName, safeError, safeTurnError, VantaError } from './trueforge';
 import type { EditReasoningEffort, Event, Forge, ModelFailure } from './trueforge';
@@ -155,6 +156,7 @@ export class StudioSession {
   };
 
   readonly #listeners = new Set<() => void>();
+  readonly #proof = new ProofTrail();
   #check?: AbortController;
   #active?: Run;
   #disposed = false;
@@ -164,6 +166,7 @@ export class StudioSession {
   #history: ArchivedConversation[];
   #modelOverride?: { model: string; serverUrl: string; configuredModel: string };
   #editReasoning?: { serverUrl: string; byModel: ReadonlyMap<string, EditReasoningEffort> };
+  #agentChanges?: { conversationId?: string; summary: NonNullable<StudioState['changes']> };
   #undo?: () => Promise<void>;
   #undoing = false;
   #revision?: { id: string; scope: string; prompt: string; evidence: string; diagnostic?: string; verification?: string; failedTests?: string[]; staging: string[] };
@@ -180,11 +183,17 @@ export class StudioSession {
   }
 
   #set(update: Partial<StudioState>) {
-    this.state = { ...this.state, ...update };
+    const before = this.state;
+    const next = { ...before, ...update };
+    const changes = this.#agentChanges;
+    next.changes = changes && changes.conversationId === next.conversationId ? changes.summary : undefined;
+    this.state = next;
+    this.#proof.observe(before, this.state);
     for (const listener of this.#listeners) listener();
   }
 
   #activity(label: string, detail?: string) {
+    this.#proof.activity(label, detail);
     this.#set({ activity: [...this.state.activity.slice(-39), { label, detail }] });
   }
 
@@ -283,17 +292,28 @@ export class StudioSession {
   async workspaceChanged() {
     const finished = this.#active?.finished;
     this.#undo = undefined;
+    this.#agentChanges = undefined;
     this.#revision = undefined;
-    this.#set({ context: [], changes: undefined, retry: undefined, revision: undefined });
+    this.#set({ context: [], retry: undefined, revision: undefined });
     await this.cancel();
     await finished;
     this.#rememberConversation();
     this.#scope = this.dependencies.scopeKey?.() ?? '';
+    this.#proof.clear();
     this.#showConversation();
   }
 
   hasLocation(path: string, line: number) {
     return this.state.context?.some((report) => report.hits.some((hit) => hit.path === path && hit.start === line)) ?? false;
+  }
+
+  proofTrail() {
+    return this.#scope === (this.dependencies.scopeKey?.() ?? '') ? this.#proof.read(this.state) : undefined;
+  }
+
+  recordProofUndo() {
+    const record = this.#proof.undoCallback();
+    return () => { record(); this.#set({}); };
   }
 
   submit(prompt: string, shareContext = false, target?: QuickEditTarget, agentMode = false): Promise<void> {
@@ -325,6 +345,7 @@ export class StudioSession {
     run.revisionInput = revisionInput;
     this.#revision = undefined;
     this.#active = run;
+    this.#proof.start(this.state.conversationId, target ? 'Quick Edit' : agentMode ? 'Agent Mode' : undefined, prompt);
     this.#set({
       phase: 'starting', activity: revisionInput ? this.state.activity : [], context: [], error: undefined, review: undefined, retry: undefined, revision: undefined,
       quickEdit: !!target, agentMode: agentMode && !target, verification: undefined,
@@ -364,6 +385,7 @@ export class StudioSession {
     const canRevise = feedback !== undefined && !this.state.error && run.bridgeClosed && revision
       && revision.scope === this.dependencies.scopeKey?.() && !this.#disposed;
     this.#active = undefined;
+    this.#proof.finish(phase);
     this.#set({ phase, approval: undefined, review: undefined, activeModel: undefined,
       error: this.state.error ?? (run.revisionInput && phase === 'failed' ? 'The correction ended before a verified proposal could be applied.' : undefined),
       revision: !run.reviewExit && revision ? { id: revision.id } : undefined,
@@ -424,6 +446,7 @@ export class StudioSession {
               run.modelActive = true;
               if (quick.reviewed || quick.patch) throw new VantaError('This turn already has a staged proposal. Start a new Quick Edit to replace it.');
               quick.patch = new QuickPatch(quick.target.base, explanation, replacement);
+              this.#proof.staged(quick.patch.base.path, quick.patch.base.text, quick.patch.hunks);
               this.#activity('Quick Edit staged', quick.patch.id);
               return quick.patch;
             },
@@ -437,6 +460,7 @@ export class StudioSession {
               if (correction) {
                 quick.patch.revoke();
                 quick.patch = checked;
+                this.#proof.staged(checked.base.path, checked.base.text, checked.hunks);
               }
               quick.checked = true;
               this.#activity('Quick Edit draft checked', `${checks.length} scenarios${correction ? ' · draft corrected' : ''}`);
@@ -491,6 +515,10 @@ export class StudioSession {
       if (!quick && !editing) this.#conversation = conversation;
       this.#set({ sessionId: run.sessionId, quickEdit: !!quick, agentMode: !!editing });
       this.#activity(reusable ? 'Session resumed' : 'Session started');
+      if (quick) {
+        const { path, text, start, end } = quick.target.base;
+        this.#proof.add({ kind: 'selection', path, start: text.slice(0, start).split('\n').length, end: text.slice(0, end - 1).split('\n').length });
+      }
       const sessionId = run.sessionId;
       await this.#consume(run, (streamSignal) => run.forge.start(sessionId, input, streamSignal, conversation.lastTurnId));
       if (!run.terminal && run.pauseCursor && run.turnId && run.releasePause) {
@@ -527,12 +555,15 @@ export class StudioSession {
           throw new VantaError('Agent Mode requires reviewed hunks, a passing verification receipt and a completed TrueForge turn.');
         } else {
           const files = editing.patch.approved(editing.receipt);
-          this.#undo = await editing.workspace.apply(files, signal, () => {
+          const undo = await editing.workspace.apply(files, signal, () => {
             signal.throwIfAborted();
             editing.committing = true;
           });
+          const recordUndo = this.#proof.undoCallback();
+          this.#undo = async () => { await undo(); recordUndo(); };
           if (this.dependencies.scopeKey?.() === editing.scope) {
-            this.#set({ changes: { paths: files.map(({ base }) => base.path), status: 'applied' } });
+            this.#agentChanges = { conversationId: this.state.conversationId,
+              summary: { paths: files.map(({ base }) => base.path), status: 'applied' } };
           } else this.#undo = undefined;
           this.#activity('Agent changes applied to buffers', files.map(({ base }) => base.path).join(', '));
         }
@@ -675,6 +706,8 @@ export class StudioSession {
             throw error;
           }
           this.#activity('Agent file staged', proposal.path);
+          const file = agent.patch.files.get(proposal.path);
+          if (file) this.#proof.staged(file.base.path, file.base.text, file.hunks);
           return staged;
         } catch (error) {
           this.#activity('Agent staging rejected', error instanceof VantaError ? error.message : 'The target could not be captured.');
@@ -870,6 +903,10 @@ export class StudioSession {
         this.#activity('Tool returned', run.calls.get(event.toolCallId)?.name);
         break;
       case 'user.tool_approval':
+        if (event.threadId === 'main' && run.decided?.has(event.toolCallId)
+          && (event.approval.status === 'allow' || event.approval.status === 'deny')) {
+          this.#proof.approval(event.toolCallId, run.calls.get(event.toolCallId)?.name ?? (run.quick ? reviewTool : undefined), event.approval.status);
+        }
         if (run.quick?.approvalId === event.toolCallId && event.approval.status === 'allow' && run.quick.reviewed) {
           run.quick.acknowledged = true;
         }
@@ -886,6 +923,7 @@ export class StudioSession {
         run.terminal = event.state.status === 'done' ? 'completed' : event.state.status === 'cancelled' ? 'cancelled' : 'failed';
         const message = event.state.status === 'error' ? event.state.message : undefined;
         const failure = message ? modelFailure(message) : undefined;
+        if (message?.startsWith('[Model Error] ')) this.#proof.add({ kind: 'provider-failure', detail: failure?.detail });
         run.fallbackFailure = message && failure && isFallbackFailure(message, failure) ? failure : undefined;
         run.approval = undefined;
         this.#set({ approval: undefined, error: failure?.detail });
@@ -1097,7 +1135,11 @@ export class StudioSession {
     try {
       await this.#undo();
       this.#undo = undefined;
-      if (this.state.changes) this.#set({ changes: { ...this.state.changes, status: 'undone' }, error: undefined });
+      const changes = this.#agentChanges;
+      if (changes) {
+        changes.summary = { ...changes.summary, status: 'undone' };
+        if (changes.conversationId === this.state.conversationId) this.#set({ error: undefined });
+      }
     } catch (error) { this.#set({ error: safeError(error) }); }
     finally { this.#undoing = false; }
   }
@@ -1106,6 +1148,9 @@ export class StudioSession {
     const run = this.#active;
     const approval = run?.approval;
     if (!run?.sessionId || !run.turnId || !approval || id !== approval.id || (allow && !approval.canAllow) || run.abort.signal.aborted) return;
+    if (run.quick || approval.name === reviewAgentTool) {
+      this.#proof.add({ kind: 'review-submitted', decision: allow ? 'approve selection' : 'discard proposal' });
+    }
     const releasePause = run.releasePause;
     (run.decided ??= new Set()).add(approval.id);
     const agent = run.agent;

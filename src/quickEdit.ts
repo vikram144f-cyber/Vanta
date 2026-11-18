@@ -109,6 +109,7 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
         }
         if (document.getText() !== expected) throw new VantaError('The buffer changed during apply. Inspect it in the editor and use Undo if needed.');
         const version = document.version;
+        const recordUndo = this.session.recordProofUndo?.();
         this.#undo = async () => {
           const timeout = AbortSignal.timeout(4500);
           if (!scope.isAvailable() || await disk.location(path, timeout) !== absolute) {
@@ -127,6 +128,7 @@ export class QuickEdit implements vscode.TextDocumentContentProvider, vscode.Dis
           if (!await editor.edit((edit) => {
             edit.replace(new vscode.Range(new vscode.Position(0, 0), current.positionAt(expected.length)), base.text);
           }, { undoStopBefore: true, undoStopAfter: true })) throw new VantaError('VS Code rejected Quick Edit undo.');
+          recordUndo?.();
         };
       } };
   }

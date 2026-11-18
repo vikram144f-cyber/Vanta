@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light dark;
+  font: var(--vscode-font-weight, 400) var(--vscode-font-size, 13px)/1.5 var(--vscode-font-family, system-ui);
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  --muted: var(--vscode-descriptionForeground);
+  --border: var(--vscode-widget-border, var(--vscode-panel-border));
+  --accent: var(--vscode-focusBorder);
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: clamp(16px, 5vw, 44px); overflow-wrap: anywhere; }
+main { margin: 0 auto; max-width: 760px; }
+header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+h1, h2, p { margin: 0; }
+h1 { font-size: 2.3rem; line-height: 1.1; letter-spacing: -.035em; }
+h2 { font-size: 1.04rem; }
+.mode, .subtitle, .meta, .notice, .overview span, li span { color: var(--muted); }
+.mode { margin-bottom: 5px; }
+.subtitle { margin-top: 4px; }
+button { padding: 7px 13px; border: 1px solid transparent; border-radius: 5px; font: inherit; cursor: pointer;
+  background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+button:hover { background: var(--vscode-button-hoverBackground); }
+button:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
+.overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1px; padding: 1px;
+  background: var(--border, transparent); border-radius: 7px; overflow: hidden; margin-bottom: 18px; }
+.overview div { display: grid; padding: 9px 13px; background: var(--vscode-sideBar-background); }
+.overview span, .meta { font-size: .9rem; }
+.notice { margin: 10px 0; }
+.timeline { list-style: none; margin: 16px 0 0 5px; padding: 0 0 0 16px; border-left: 1px solid var(--border, var(--muted)); }
+.event { position: relative; margin: 0 0 12px; padding: 9px 13px; border: 1px solid var(--border, transparent); border-radius: 6px; }
+.event::before { position: absolute; content: ''; width: 7px; height: 7px; border: 1px solid var(--accent);
+  background: var(--vscode-editor-background); border-radius: 50%; left: -21px; top: 15px; }
+.event h2 { margin-bottom: 3px; }
+.event ul { padding-left: 0; list-style: none; margin: 4px 0 0; }
+.event li + li { margin-top: 4px; }
+.task { white-space: pre-wrap; }
+code { font: inherit; font-family: var(--vscode-editor-font-family, monospace); }

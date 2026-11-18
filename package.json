@@ -66,6 +66,10 @@
       {
         "command": "vanta.cancelRun",
         "title": "VANTA: Cancel Current Run"
+      },
+      {
+        "command": "vanta.openProofTrail",
+        "title": "VANTA: Open ProofTrail"
       }
     ],
     "menus": {

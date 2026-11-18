@@ -9,6 +9,7 @@ import { TrueForgeClient } from './trueforge';
 import { workspaceRepository, workspaceScope } from './editorRepository';
 import { QuickEdit, quickEditScheme } from './quickEdit';
 import { editorAgent } from './editorAgent';
+import { ProofTrailPanel } from './proofTrailPanel';
 
 function contextBudget() {
   return Math.max(2000, Math.min(16000, Math.floor(vscode.workspace.getConfiguration('vanta').get('contextBudget', 8000)) || 8000));
@@ -50,6 +51,7 @@ class StudioView implements vscode.WebviewViewProvider {
         case 'refreshConnection': void this.session.refresh(); break;
         case 'submitPrompt': void this.session.submit(action.text, action.shareContext, undefined, action.agentMode); break;
         case 'undoAgent': void this.session.undoAgent(); break;
+        case 'openProofTrail': void vscode.commands.executeCommand('vanta.openProofTrail'); break;
         case 'selectModel': this.session.selectModel(action.model); break;
         case 'cancelRun': void this.session.cancel(); break;
         case 'clearConversation': this.session.clear(); break;
@@ -142,14 +144,17 @@ export function activate(context: vscode.ExtensionContext) {
   });
   session = studio;
   const quickEdit = new QuickEdit(studio, contextBudget);
+  const proofTrail = new ProofTrailPanel(context.extensionUri, studio);
   context.subscriptions.push(
     quickEdit,
+    proofTrail,
     vscode.workspace.registerTextDocumentContentProvider(quickEditScheme, quickEdit),
     vscode.window.registerWebviewViewProvider('vanta.studio', new StudioView(context.extensionUri, studio)),
     vscode.commands.registerCommand('vanta.openStudio', () => vscode.commands.executeCommand('vanta.studio.focus')),
     vscode.commands.registerCommand('vanta.quickEdit', () => quickEdit.run()),
     vscode.commands.registerCommand('vanta.undoQuickEdit', () => quickEdit.undo()),
     vscode.commands.registerCommand('vanta.cancelRun', () => studio.cancel()),
+    vscode.commands.registerCommand('vanta.openProofTrail', () => proofTrail.open()),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('vanta')) void studio.refresh();
     }),

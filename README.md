@@ -7,6 +7,7 @@ VANTA is a desktop VS Code coding agent for Windows. It uses a local TrueForge a
 - **Agent Mode** stages edits across existing files. It requires native hunk approval, separate approval for the configured pytest profile, a passing snapshot check and a completed TrueForge turn before applying the patch to editor buffers.
 - **Recovery** offers Stop, clear model errors, prompt restoration and model switching. An optional secondary model can start a fresh session after a confirmed early model failure.
 - **Conversation history** reopens recent conversations in the current workspace. **New conversation** opens an empty transcript. Test results follow their conversation, and workspace undo remains available for the latest applied patch.
+- **ProofTrail** opens a read-only timeline beside Agent Studio after a Quick Edit or Agent Mode run. **Copy receipt** copies sanitized JSON with numbered file aliases. Prompt text, paths, model and session names, and command output stay out of the receipt. Full trails are kept for recent runs in the current window. Older conversations show only the evidence retained in chat history.
 
 ## Install and launch on Windows
 

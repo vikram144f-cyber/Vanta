@@ -17,12 +17,13 @@ export async function run() {
   await extension.activate();
   assert.ok(extension.isActive);
   const commands = await vscode.commands.getCommands();
-  for (const name of ['vanta.openStudio', 'vanta.quickEdit', 'vanta.undoQuickEdit', 'vanta.cancelRun', 'vanta.studio.focus']) {
+  for (const name of ['vanta.openStudio', 'vanta.quickEdit', 'vanta.undoQuickEdit', 'vanta.cancelRun', 'vanta.openProofTrail', 'vanta.studio.focus']) {
     assert.ok(commands.includes(name), name);
   }
   await vscode.commands.executeCommand('vanta.openStudio');
   await vscode.commands.executeCommand('vanta.quickEdit');
   await vscode.commands.executeCommand('vanta.cancelRun');
+  await vscode.commands.executeCommand('vanta.openProofTrail');
   const buffer = await vscode.workspace.openTextDocument({ content: 'first\nunchanged\nthird\n', language: 'plaintext' });
   const editor = await vscode.window.showTextDocument(buffer);
   assert.equal(await editor.edit((builder) => builder.insert(new vscode.Position(3, 0), 'user change\n')), true);
@@ -96,14 +97,13 @@ export async function run() {
   const paths = ['agent-a.txt', 'agent-b.txt', 'agent-c.txt'];
   const source = 'original\r\n';
   for (const path of paths) await writeFile(join(folder.uri.fsPath, path), source);
-  const captureDeadline = AbortSignal.timeout(15_000);
-  const approved = await Promise.all(paths.map(async (path) => ({ base: await repo.capture(path, captureDeadline), after: 'reviewed\r\n', ids: [1] })));
+  const deadline = () => AbortSignal.timeout(15_000);
+  const approved = await Promise.all(paths.map(async (path) => ({ base: await repo.capture(path, deadline()), after: 'reviewed\r\n', ids: [1] })));
   const staged = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, paths[0]!));
   // Exceed VS Code's document-reference cache to simulate expiry without waiting minutes.
   await evict(staged, 'agent-staged');
-  const deadline = AbortSignal.timeout(15_000);
   let commits = 0;
-  const apply = () => repo.apply(approved, deadline, () => { commits++; });
+  const apply = () => repo.apply(approved, deadline(), () => { commits++; });
   const revert = await apply();
   assert.equal(commits, 1);
   const applied = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, paths[0]!));
@@ -121,27 +121,26 @@ export async function run() {
   const dirty = new vscode.WorkspaceEdit();
   dirty.insert(target.uri, new vscode.Position(0, 0), 'user edit\r\n');
   assert.equal(await vscode.workspace.applyEdit(dirty), true);
-  await assert.rejects(repo.capture(paths[0]!, deadline), /clean/);
+  await assert.rejects(repo.capture(paths[0]!, deadline()), /clean/);
   const removed = 'agent-removed.txt';
   await writeFile(join(folder.uri.fsPath, removed), source);
-  const clean = await repo.capture(removed, deadline);
+  const clean = await repo.capture(removed, deadline());
   await unlink(join(folder.uri.fsPath, removed));
-  await assert.rejects(repo.apply([{ base: clean, after: 'change\r\n', ids: [1] }], deadline, () => { commits++; }));
+  await assert.rejects(repo.apply([{ base: clean, after: 'change\r\n', ids: [1] }], deadline(), () => { commits++; }), { code: 'ENOENT' });
   const changed = 'agent-changed.txt';
   await writeFile(join(folder.uri.fsPath, changed), source);
-  const changedBase = await repo.capture(changed, deadline);
+  const changedBase = await repo.capture(changed, deadline());
   await writeFile(join(folder.uri.fsPath, changed), 'changed on disk\r\n');
-  await assert.rejects(repo.apply([{ base: changedBase, after: 'reviewed\r\n', ids: [1] }], deadline, () => { commits++; }), /changed on disk/);
+  await assert.rejects(repo.apply([{ base: changedBase, after: 'reviewed\r\n', ids: [1] }], deadline(), () => { commits++; }), /changed on disk/);
   assert.equal(await readFile(join(folder.uri.fsPath, changed), 'utf8'), 'changed on disk\r\n');
   assert.equal(commits, 1);
   assert.match(target.getText(), /^user edit/);
   const latePaths = ['late-disk-a.txt', 'late-disk-b.txt'];
-  const lateSignal = AbortSignal.timeout(15_000);
   const lateEdits = await Promise.all(latePaths.map(async (path) => {
     await writeFile(join(folder.uri.fsPath, path), source);
-    return { base: await repo.capture(path, lateSignal), after: 'reviewed\r\n', ids: [1] };
+    return { base: await repo.capture(path, deadline()), after: 'reviewed\r\n', ids: [1] };
   }));
-  await assert.rejects(repo.apply(lateEdits, lateSignal, () => {
+  await assert.rejects(repo.apply(lateEdits, deadline(), () => {
     writeFileSync(join(folder.uri.fsPath, latePaths[0]!), 'external change\r\n');
   }), /changed on disk during the edit/);
   assert.equal(await readFile(join(folder.uri.fsPath, latePaths[0]!), 'utf8'), 'external change\r\n');

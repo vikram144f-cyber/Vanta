@@ -440,6 +440,10 @@ for (const mode of ['apply', 'corrected draft', 'unchecked review', 'superseded 
     assert.deepEqual(received, [`${request}\n\nCaptured selection (JSON evidence):\n${evidence}`]);
     assert.equal(buffer, mode === 'apply' ? 'one\nkeep\nTHREE\n' : mode === 'corrected draft' ? 'one\nkeep\nTHIRD\n' : original);
     assert.equal(session.state.review, undefined);
+    if (mode === 'apply') {
+      assert.deepEqual(session.proofTrail()?.events.map(({ kind }) => kind),
+        ['task', 'session', 'selection', 'proposal', 'review', 'review', 'review-submitted', 'approval', 'outcome', 'finished']);
+    }
     if (mode === 'unchecked review' || mode === 'superseded review') {
       assert.equal(session.state.phase, 'failed');
       assert.match(session.state.error ?? '', /requires the exact checked proposal/);

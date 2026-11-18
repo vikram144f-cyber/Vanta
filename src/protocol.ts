@@ -54,7 +54,7 @@ export interface StudioState {
 }
 
 export type StudioAction =
-  | { type: 'ready' | 'refreshConnection' | 'cancelRun' | 'clearConversation' | 'pickReference' | 'undoAgent' }
+  | { type: 'ready' | 'refreshConnection' | 'cancelRun' | 'clearConversation' | 'pickReference' | 'undoAgent' | 'openProofTrail' }
   | { type: 'submitPrompt'; text: string; shareContext?: boolean; agentMode?: boolean }
   | { type: 'openConversation'; id: string }
   | { type: 'selectModel'; model: string }
@@ -77,6 +77,7 @@ export function parseStudioAction(value: unknown): StudioAction | undefined {
     case 'clearConversation':
     case 'pickReference':
     case 'undoAgent':
+    case 'openProofTrail':
       return { type: value.type };
     case 'submitPrompt':
       if ('text' in value && typeof value.text === 'string' && value.text.length <= 12_000 && value.text.trim()) {

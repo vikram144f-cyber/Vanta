@@ -178,7 +178,7 @@ test('Ruff staging returns new undefined names, preserves baseline findings, and
   assert.equal(patch.reference.revision, 1);
 });
 
-for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject and revise', 'revision failure', 'revision without proposal', 'revision cancellation', 'rejected staging loop', 'invalid syntax', 'invalid selected hunks', 'deny', 'cancel', 'failed test', 'correct failed test', 'correction fails', 'interrupted', 'forged'] as const) {
+for (const verdict of ['allow', 'conversation switching', 'fallback', 'deferred', 'deny review', 'reject and revise', 'revision failure', 'revision without proposal', 'revision cancellation', 'rejected staging loop', 'invalid syntax', 'invalid selected hunks', 'deny', 'cancel', 'failed test', 'correct failed test', 'correction fails', 'interrupted', 'forged'] as const) {
   test(`Agent Mode patch and verification gates · ${verdict}`, { skip: !python, timeout: 15_000 }, async () => {
     assert.ok(python);
     const path = 'test_fixture.py';
@@ -302,6 +302,12 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
         register: async () => undefined, remove: async () => undefined, cancel: async () => { cancellations++; },
       }),
       scopeKey: () => workspace,
+      history: verdict === 'conversation switching' ? {
+        load: () => [{ id: 'older-chat', scope: root, title: 'Older conversation', view: {
+          phase: 'completed', agentMode: true, messages: [{ id: 'older-task', role: 'user', text: 'Older task' }], activity: [],
+        } }],
+        save: async () => undefined,
+      } : undefined,
       agentWorkspace: async () => ({ repository: repo, capture: async () => { captures++; return base(path, source); }, preview: async () => undefined,
         apply: async (files, _signal, begin) => {
           begin();
@@ -448,7 +454,7 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
         return;
       }
       await run;
-      const applies = verdict === 'allow' || verdict === 'deferred' || verdict === 'fallback' || invalidSelection;
+      const applies = verdict === 'allow' || verdict === 'conversation switching' || verdict === 'deferred' || verdict === 'fallback' || invalidSelection;
       assert.equal(writes, applies ? 1 : 0);
       assert.deepEqual(approved, verdict === 'cancel' ? ['allow'] : ['allow', verdict === 'deny' ? 'deny' : 'allow']);
       if (applies) assert.equal(session.state.verification?.status, 'passed');
@@ -457,6 +463,10 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
         assert.equal(sessions, 2);
         assert.equal(captures, 1);
         assert.equal(session.state.phase, 'completed');
+        const proof = session.proofTrail()?.events ?? [];
+        assert.deepEqual(proof.flatMap((event) => event.kind === 'session' ? [event.model] : []), ['fixture', 'backup']);
+        assert.deepEqual(proof.flatMap((event) => event.kind === 'approval' ? [event.tool] : []), ['patch review', 'pytest']);
+        assert.ok(proof.some((event) => event.kind === 'verification' && event.status === 'passed' && event.exitCode === 0));
       }
       if (verdict === 'deny') assert.equal(session.state.verification?.status, 'denied');
       if (verdict === 'cancel') assert.equal(session.state.phase, 'cancelled');
@@ -495,6 +505,28 @@ for (const verdict of ['allow', 'fallback', 'deferred', 'deny review', 'reject a
         assert.equal(writes, 0);
       }
       if (verdict === 'forged' || verdict === 'interrupted') assert.equal(session.state.phase, 'failed');
+      if (verdict === 'conversation switching') {
+        const owner = session.state.conversationId!;
+        assert.deepEqual(session.state.changes, { paths: [path], status: 'applied' });
+        session.openConversation('older-chat');
+        assert.equal(session.state.conversationId, 'older-chat');
+        assert.equal(session.state.changes, undefined);
+        assert.ok(!session.proofTrail()?.events.some(({ kind }) => kind === 'outcome'));
+        session.clear();
+        assert.equal(session.state.changes, undefined);
+        session.openConversation(owner);
+        assert.deepEqual(session.state.changes, { paths: [path], status: 'applied' });
+        assert.equal(writes, 1);
+        await session.undoAgent();
+        assert.equal(writes, 0);
+        assert.deepEqual(session.state.changes, { paths: [path], status: 'undone' });
+        session.clear();
+        assert.equal(session.state.changes, undefined);
+        session.openConversation('older-chat');
+        assert.equal(session.state.changes, undefined);
+        session.openConversation(owner);
+        assert.deepEqual(session.state.changes, { paths: [path], status: 'undone' });
+      }
       if (verdict === 'allow') {
         const firstId = session.state.conversationId!;
         const verificationResult = session.state.verification;
