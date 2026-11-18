@@ -1,0 +1,171 @@
+{
+  "name": "vanta",
+  "displayName": "VANTA",
+  "description": "A TrueForge coding agent inside VS Code.",
+  "publisher": "vikram144f-cyber",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.100.0",
+    "node": ">=22"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.cjs",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Chat is available. Workspace tools require trust."
+    },
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "Workspace tools require a local folder."
+    }
+  },
+  "activationEvents": [
+    "onView:vanta.studio"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vanta",
+          "title": "VANTA",
+          "icon": "media/vanta.svg"
+        }
+      ]
+    },
+    "views": {
+      "vanta": [
+        {
+          "type": "webview",
+          "id": "vanta.studio",
+          "name": "Agent Studio"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "vanta.openStudio",
+        "title": "VANTA: Open Agent Studio"
+      },
+      {
+        "command": "vanta.quickEdit",
+        "title": "VANTA: Quick Edit"
+      },
+      {
+        "command": "vanta.undoQuickEdit",
+        "title": "VANTA: Undo Last Quick Edit"
+      },
+      {
+        "command": "vanta.cancelRun",
+        "title": "VANTA: Cancel Current Run"
+      }
+    ],
+    "menus": {
+      "editor/context": [{ "command": "vanta.quickEdit", "when": "editorHasSelection && !editorReadonly && resourceScheme == file", "group": "1_modification" }]
+    },
+    "keybindings": [
+      {
+        "command": "vanta.quickEdit",
+        "key": "ctrl+alt+i",
+        "mac": "cmd+alt+i",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "VANTA",
+      "properties": {
+        "vanta.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:8790",
+          "scope": "application",
+          "description": "Base URL of local TrueForge (loopback only)."
+        },
+        "vanta.model": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Exact model name registered in TrueForge. Leave blank to choose in Agent Studio."
+        },
+        "vanta.secondaryModel": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Optional second model registered in TrueForge. Tries it once in a new session after a confirmed model failure before any model output or tool activity."
+        },
+        "vanta.agentName": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Optional saved TrueForge agent used when the workspace tool is disabled. Use a VANTA agent you have configured for chat only."
+        },
+        "vanta.workspaceOverview": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Offer read-only workspace tools in a trusted local folder."
+        },
+        "vanta.contextBudget": {
+          "type": "integer",
+          "default": 8000,
+          "minimum": 2000,
+          "maximum": 16000,
+          "scope": "application",
+          "description": "Estimated repository context tokens allowed per turn."
+        },
+        "vanta.agentToolReplyDelayMs": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 20000,
+          "scope": "application",
+          "description": "Optional delay before VANTA Agent Mode tool replies to space out model requests. Applies only to VANTA tools and does not control provider retries or TrueForge's own tools."
+        },
+        "vanta.verificationPython": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Absolute path to the trusted Python interpreter with pytest and project dependencies for Agent Mode."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "tsx --test test/unit/*.test.ts",
+    "test:extension": "npm run build && node scripts/test-extension.mjs",
+    "test:live": "tsx --test --test-concurrency=1 test/live/*.test.ts",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "@truefoundry/trueforge-sdk": "0.185.0",
+    "diff": "9.0.0",
+    "ignore": "7.0.14",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.17.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/vscode": "~1.100.0",
+    "@vscode/test-electron": "^2.5.2",
+    "esbuild": "^0.27.0",
+    "eslint": "^9.39.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.46.0"
+  }
+}
