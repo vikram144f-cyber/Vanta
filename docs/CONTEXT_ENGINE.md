@@ -1,12 +1,6 @@
-# M3 repository context
+# Repository context
 
-## Refined M3 brief
-
-Implement read-only repository discovery in VANTA on TrueForge 0.185.1. Reuse the current session for follow-ups, chain from the last completed turn, and rotate the MCP endpoint and bearer secret on every turn. Preserve streaming, cancellation and native approval for workspace overview. Require explicit consent before sharing new workspace context with TrueForge and its model.
-
-Expose bounded filename and text search, symbol navigation, snippet reads, and deterministic task-based ranking through the authenticated MCP bridge. Resolve explicit file and symbol references before sending. Show returned paths, locations, reasons and estimated budget use in Context Explorer. Keep reads inside one trusted local workspace and make file discovery work without ripgrep.
-
-On the pinned Flask checkout, prove that a prompt with no filenames returns implementation, test and documentation locations. Show actual deferred discovery and invocation in TrueForge. Resolve `get_debug_flag` and explicit references in follow-up turns under the same session ID. Confirm the checkout stays clean. Run unit, HTTP transport, native Windows extension and live TrueForge checks. Label unverified behavior and leave file editing and command execution for later milestones.
+VANTA searches one trusted local workspace and shares bounded source ranges with TrueForge. Context Explorer shows which parts of the repository were shared and why VANTA selected them.
 
 ## Use Agent Studio
 

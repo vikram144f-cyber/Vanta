@@ -1,60 +1,51 @@
 # VANTA
 
-VANTA is a desktop VS Code coding agent for Windows. It uses a local TrueForge agent to discover repository context, propose edits and run approved checks. Agent Studio shows the run, why files were selected and what is waiting for review.
+VANTA is a desktop VS Code coding agent built on TrueForge. It searches your repository, streams responses in Agent Studio, and lets you review changes hunk by hunk in native VS Code diffs. Built from scratch for the TrueFoundry Forge-a-thon. Released under the [MIT License](LICENSE).
 
-- **Context Explorer** shows bounded repository search, symbol lookup and source snippets. Share workspace context for a turn, or attach a specific file or symbol with `@file:` or `@symbol:`.
-- **Quick Edit** starts from a selection and opens a native VS Code diff. Review each hunk, apply the approved changes and save. **VANTA: Undo Last Quick Edit** can restore a saved edit when the source still matches.
-- **Agent Mode** stages edits across existing files. It requires native hunk approval, separate approval for the configured pytest profile, a passing snapshot check and a completed TrueForge turn before applying the patch to editor buffers.
-- **Recovery** offers Stop, clear model errors, prompt restoration and model switching. An optional secondary model can start a fresh session after a confirmed early model failure.
-- **Conversation history** reopens recent conversations in the current workspace. **New conversation** opens an empty transcript. Test results follow their conversation, and workspace undo remains available for the latest applied patch.
-- **ProofTrail** opens a read-only timeline beside Agent Studio after a Quick Edit or Agent Mode run. **Copy receipt** copies sanitized JSON with numbered file aliases. Prompt text, paths, model and session names, and command output stay out of the receipt. Full trails are kept for recent runs in the current window. Older conversations show only the evidence retained in chat history.
+## Run on Windows
 
-## Install and launch on Windows
+You’ll need desktop VS Code 1.100 or later, Node.js 22.14 or later, and Git. Run the following in PowerShell.
 
-1. Clone [VANTA on GitHub](https://github.com/vikram144f-cyber/Vanta) on the default `main` branch. Use desktop VS Code 1.100+ and Node.js 22.14+. In the repository, run `npm.cmd ci`.
-2. In a separate PowerShell window, start the verified TrueForge version. The loopback allowlist lets TrueForge call VANTA's local MCP endpoint. If a server is already running with a different allowlist, restart it from its terminal with these settings.
+```powershell
+git clone https://github.com/vikram144f-cyber/Vanta.git
+Set-Location Vanta
+npm.cmd ci
+```
 
-   ```powershell
-   $env:NETWORK_POLICY_ENABLED = 'true'
-   $env:OUTBOUND_URL_ALLOWED_HOSTS = '["127.0.0.1"]'
-   npx.cmd @truefoundry/trueforge@0.185.1
-   ```
+In a separate PowerShell window, start TrueForge. The loopback allowlist lets it reach VANTA’s authenticated local MCP endpoint. The project uses TrueForge `0.185.1` with SDK `0.185.0`.
 
-3. Open the [local TrueForge dashboard](http://localhost:8790) and configure a model provider. The [example manifest](docs/model-provider.example.json) shows the shape of a Google Gemini profile with a placeholder key. Enter credentials only in TrueForge. Use the [offline Task C fixture](docs/M6_VERIFICATION.md#reproduce-task-c-without-using-provider-quota) to demonstrate recovery without a provider credential or paid API.
-4. Open the VANTA repository in VS Code and press **F5** with **Run VANTA**. In the Extension Development Host, open and trust a single local repository. Click the **VANTA** icon or run **VANTA: Open Agent Studio**. Select a configured model. If the list changed, click **Refresh**.
-5. For Agent Mode verification, set **VANTA: Verification Python** to an absolute path to a trusted Python interpreter containing pytest and the demo project's dependencies. Enable **Agent Mode** and **Share workspace context** before submitting a task.
+```powershell
+$env:NETWORK_POLICY_ENABLED = 'true'
+$env:OUTBOUND_URL_ALLOWED_HOSTS = '["127.0.0.1"]'
+npx.cmd @truefoundry/trueforge@0.185.1
+```
 
-`vanta.serverUrl` defaults to `http://localhost:8790`. `vanta.model` selects an exact TrueForge model name. To use early fallback, set `vanta.secondaryModel` to another registered name and leave `vanta.automaticFallback` enabled. The extension loads its own inline TrueForge definition when you start a request, including [Agent Mode's versioned definition](src/trueforge.ts). For chat with workspace tools disabled, you can optionally choose a saved TrueForge agent with `vanta.agentName`.
+1. Open the [local TrueForge dashboard](http://localhost:8790) and register a model that supports tool calling. The [example model config](docs/model-provider.example.json) shows a Gemini provider with a placeholder. Enter provider credentials directly in TrueForge.
+2. Open the VANTA checkout in VS Code. Press **F5** with **Run VANTA** selected. VS Code builds the extension and opens an Extension Development Host. Open and trust a single local project folder in that window to enable workspace tools.
+3. Open **VANTA: Open Agent Studio** and select a registered model. Use **Refresh** after changing providers. VANTA creates a TrueForge session and loads the appropriate [inline agent definition](src/trueforge.ts) when you send a request.
 
-## Demonstration and evidence
+`vanta.serverUrl` defaults to `http://localhost:8790`. Set `vanta.model` to preselect an exact registered model name. For automatic fallback, set `vanta.secondaryModel` to a different registered model and leave `vanta.automaticFallback` enabled. An eligible failure early in a run starts a fresh TrueForge session on the backup.
 
-| Workflow | Observed result | Reproduce |
-| --- | --- | --- |
-| Official Flask Task A | Native Quick Edit, both hunks approved, 24 behavior checks, Save, and Undo restored the original SHA-256. | [Task A evidence](docs/M4_VERIFICATION.md#gemini-35-flash-rehearsal-at-8c72cf2) |
-| Official Flask Task B | One verbatim prompt, three files reviewed and saved, 60 passing CLI tests, masked JSON, and docs alongside the built-in commands. | [Task B verification](docs/M5_VERIFICATION.md#november-18-strict-documentation-and-saved-result-check) |
-| Official Flask Task C | An unreachable primary triggered one automatic switch to a live Gemini backup. The backup reached Quick Edit review, and discarding left Git clean and preserved an unsaved edit. | [Task C evidence](docs/M6_VERIFICATION.md#observed-evidence) |
-| General-purpose multi-file edits | Live TrueForge discovered and staged an invoice implementation, test and docs. Both gates ran through the adapter, pytest passed and the in-memory apply/undo assertions passed. | [M5 fixture evidence](docs/M5_VERIFICATION.md#live-evidence), [Agent Mode guide](docs/AGENT_MODE.md) |
+## Use VANTA
 
-Use the [four-minute demo script](docs/DEMO_SCRIPT.md) and [recording checklist](docs/DEMO_CHECKLIST.md). The [technical write-up draft](docs/VANTA_TECHNICAL_WRITEUP.pdf) and [Round 1 readiness audit](docs/ROUND1_READINESS.md) describe the evidence and remaining submission work.
+- **Explore a repository.** Enable **Share workspace context** for the turn, or attach a specific file or symbol with `@file:` or `@symbol:`. Context Explorer shows which ranges were shared, why they were selected, and how much of the context budget they used. [Repository context guide](docs/CONTEXT_ENGINE.md)
+- **Edit a selection.** Select code and press **Ctrl+Alt+I**. Describe the change, review each hunk, then apply and save the selected changes. Use **VANTA: Undo Last Quick Edit** to restore the previous contents while the edited file still matches. [Quick Edit guide](docs/QUICK_EDIT.md)
+- **Change multiple files.** Set **VANTA: Verification Python** to the absolute path of a trusted interpreter with pytest and the target project’s dependencies. Enable **Agent Mode** and **Share workspace context**. Review each hunk, then approve the pytest check separately. A passing check and a completed TrueForge turn allow VANTA to apply the approved hunks to VS Code buffers. Use **Save All** to persist them. [Agent Mode guide](docs/AGENT_MODE.md)
+- **Inspect or stop a run.** Use **Stop** to cancel. **VANTA: Open ProofTrail** shows recent Quick Edit and Agent Mode events, including review, verification, and application. **Copy receipt** exports sanitized JSON with file aliases.
 
-## Architecture
+## How it works
 
-The VS Code extension host validates workspace operations and streams TrueForge SDK events to the React view. TrueForge owns the model loop, session history, tool invocation and approval events. VANTA exposes read, search, staging and approved verification through a short-lived, authenticated MCP listener on loopback. Deferred discovery loads additional repository tools when the model asks for them. Context Explorer reports what was shared. The host binds approval to the exact staged revision and applies only reviewed changes after verification. [Architecture](docs/ARCHITECTURE.md) · [Context engine](docs/CONTEXT_ENGINE.md) · [Quick Edit](docs/QUICK_EDIT.md)
+TrueForge owns the model loop, sessions, tool calls, and approval events. The TypeScript extension host streams events to Agent Studio and exposes bounded repository reads, patch staging, and approved verification through a short-lived loopback MCP connector. TrueForge loads selected tool definitions on demand, including Quick Edit’s source and symbol lookups. The host validates workspace trust and checks that the exact reviewed patch still matches the current source before applying. Agent Mode supports edits to existing files in one trusted local folder and verifies them using the configured pytest profile in a temporary snapshot.
 
-## Checks
-
-From the repository root in PowerShell, set `VANTA_TEST_PYTHON` to a Python executable with pytest to include the local command profiles. Set `VANTA_VSCODE_EXE` to an installed `Code.exe` to use that build for the Extension Host check.
+## Project checks
 
 ```powershell
 npm.cmd run typecheck
 npm.cmd run lint
-npm.cmd run build
 npm.cmd test
 npm.cmd run test:extension
 ```
 
-The unit and Extension Host checks use local fixtures. `npm.cmd run test:live` is a separate opt-in suite that can call a configured provider when the relevant model environment variables are set. The source checkout and F5 launch are the supported distribution path. This branch has no configured VSIX packaging workflow.
+The Extension Host check builds the project. Set `VANTA_VSCODE_EXE` to an installed `Code.exe` to run against that version. Set `VANTA_TEST_PYTHON` to the path of a Python interpreter with pytest to include Python verification cases. These checks work without model credentials.
 
-## Known limitations
-
-Agent Mode edits existing files and verifies Python through one approved pytest profile in a single trusted local folder. Context is bounded, and hosted providers can reach quotas or return incomplete proposals. Automatic fallback covers confirmed early provider failures. A rejected or failed-verification patch requires a new proposal and review.
+With local TrueForge running, `npm.cmd run test:fallback` exercises automatic fallback with two temporary mock models. Use `npm.cmd run test:fallback -- --serve` for a manual demo without provider credentials. In Studio select the printed `/unavailable` model and set `vanta.secondaryModel` to the printed `/backup` model. Select the full line `export const enabled = false;` in a trusted TypeScript file and request `Change the selected value to true.` in Quick Edit. Stop the fixture with **Ctrl+C** to remove its profiles.

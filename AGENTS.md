@@ -3,7 +3,7 @@
 ## Scope
 
 - Build a desktop VS Code extension in strict TypeScript. Keep the model loop, sessions, tools, streaming and approval events on local TrueForge.
-- Use [REQUIREMENTS.md](docs/REQUIREMENTS.md) for the competition brief and [ROADMAP.md](docs/ROADMAP.md) for milestone order. The Flask prompts and expected answers belong in verification fixtures only.
+- Keep the Flask prompts and expected answers in verification fixtures.
 - Support native Windows without WSL or TrueForge sandbox. Keep model profiles configurable in TrueForge and maintain a demo route that needs no paid API.
 - Verify SDK signatures against matching upstream source and exercise them on the pinned runtime. Record observed results, versions and open assumptions. Label mocks and fixtures as such.
 
@@ -16,6 +16,5 @@
 
 ## Toolchain and verification
 
-- M0 contains documentation. M1 will establish npm scripts, the lockfile and the TypeScript and extension test harness. Use the scripts defined in the repository once available.
-- Run scoped checks for the affected component and the milestone gates in [TEST_STRATEGY.md](docs/TEST_STRATEGY.md) before calling work verified.
+- Use the repository’s locked npm dependencies and run the applicable [project checks](README.md#project-checks).
 - Preserve upstream licenses and attribution for reused code. Record fork point and changes if a fork is introduced. Record AI assistance for the submission write-up.

@@ -2,7 +2,7 @@
 
 Open a trusted single-folder workspace in VS Code. Start local TrueForge and configure the exact model registered there. Keep the outbound network policy enabled and allow `127.0.0.1` for VANTA's authenticated per-run MCP connector. Follow the [README setup](../README.md).
 
-Set **VANTA: Verification Python** in User Settings to an absolute path to a trusted Python interpreter with pytest and the project's dependencies available. On Windows a dedicated virtual environment's `Scripts/python.exe` is suitable. Use the project's declared dependencies when preparing the environment. During rehearsal set **Files: Auto Save** to **off**.
+Set **VANTA: Verification Python** in User Settings to an absolute path to a trusted Python interpreter with pytest and the project's dependencies available. On Windows a dedicated virtual environment's `Scripts/python.exe` is suitable. Use the project's declared dependencies when preparing the environment.
 
 1. Enable **Agent Mode** and **Share workspace context** in Agent Studio. Submit one request for changes to existing files.
 2. Use Context Explorer to see discovery results and the paths and reasons that entered the model context. Review the proposed files in Agent Studio. Selecting a hunk opens or navigates its native VS Code diff. Accept or reject each hunk, then choose **Approve selected hunks**. Related changes may depend on one another.

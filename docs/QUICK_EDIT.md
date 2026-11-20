@@ -39,4 +39,4 @@ The **VANTA: Undo Last Quick Edit** command keeps an in-memory snapshot of the l
 | Stale, deleted or replaced file contents | Apply is refused. Start a new Quick Edit from the current file. |
 | Stop, denied approval, failed generation or missing receipt | The in-memory proposal loses authority and the source stays unchanged. A recent diff may remain visible for inspection. |
 
-M4 handles one proposal in one existing file per turn. It changes the source buffer only and leaves filesystem transactions and multi-file recovery for a later milestone. [Verification](M4_VERIFICATION.md).
+Quick Edit handles one proposal in one existing file per turn. VS Code controls when the edited buffer is saved to disk.
