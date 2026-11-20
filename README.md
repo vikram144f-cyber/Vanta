@@ -22,20 +22,22 @@ npx.cmd @truefoundry/trueforge@0.185.1
 
 1. Open the [local TrueForge dashboard](http://localhost:8790) and register a model that supports tool calling. The [example model config](docs/model-provider.example.json) shows a Gemini provider with a placeholder. Enter provider credentials directly in TrueForge.
 2. Open the VANTA checkout in VS Code. Press **F5** with **Run VANTA** selected. VS Code builds the extension and opens an Extension Development Host. Open and trust a single local project folder in that window to enable workspace tools.
-3. Open **VANTA: Open Agent Studio** and select a registered model. Use **Refresh** after changing providers. VANTA creates a TrueForge session and loads the appropriate [inline agent definition](src/trueforge.ts) when you send a request.
+3. Open **VANTA: Open Agent Studio** and select a registered model. Use **Refresh** after changing providers. Sending a request creates a TrueForge session with the matching [versioned agent definition](src/trueforge.ts).
 
 `vanta.serverUrl` defaults to `http://localhost:8790`. Set `vanta.model` to preselect an exact registered model name. For automatic fallback, set `vanta.secondaryModel` to a different registered model and leave `vanta.automaticFallback` enabled. An eligible failure early in a run starts a fresh TrueForge session on the backup.
 
 ## Use VANTA
 
-- **Explore a repository.** Enable **Share workspace context** for the turn, or attach a specific file or symbol with `@file:` or `@symbol:`. Context Explorer shows which ranges were shared, why they were selected, and how much of the context budget they used. [Repository context guide](docs/CONTEXT_ENGINE.md)
-- **Edit a selection.** Select code and press **Ctrl+Alt+I**. Describe the change, review each hunk, then apply and save the selected changes. Use **VANTA: Undo Last Quick Edit** to restore the previous contents while the edited file still matches. [Quick Edit guide](docs/QUICK_EDIT.md)
-- **Change multiple files.** Set **VANTA: Verification Python** to the absolute path of a trusted interpreter with pytest and the target project’s dependencies. Enable **Agent Mode** and **Share workspace context**. Review each hunk, then approve the pytest check separately. A passing check and a completed TrueForge turn allow VANTA to apply the approved hunks to VS Code buffers. Use **Save All** to persist them. [Agent Mode guide](docs/AGENT_MODE.md)
+- **Find relevant code.** Enable **Share workspace context**, or attach a reference such as `@file:src/main.py` or `@symbol:src/main.py#main`. Context Explorer shows the returned ranges, selection reasons, and use of the estimated token budget.
+- **Edit a selection.** Select code and run **VANTA: Quick Edit** from the Command Palette or press **Ctrl+Alt+I**. Review each hunk in the native diff, then apply the accepted hunks or discard the proposal. Save the file to persist the edit. **VANTA: Undo Last Quick Edit** restores the previous content if the file still matches the applied edit.
+- **Change multiple files.** Set **VANTA: Verification Python** to the absolute path of a trusted interpreter with pytest and the target project's dependencies. Enable **Agent Mode** and **Share workspace context**. Review the hunks, then approve pytest separately. VANTA applies the approved edits to editor buffers after pytest passes and the TrueForge turn completes. Use **Save All** to persist the edits.
 - **Inspect or stop a run.** Use **Stop** to cancel. **VANTA: Open ProofTrail** shows recent Quick Edit and Agent Mode events, including review, verification, and application. **Copy receipt** exports sanitized JSON with file aliases.
 
 ## How it works
 
 TrueForge owns the model loop, sessions, tool calls, and approval events. The TypeScript extension host streams events to Agent Studio and exposes bounded repository reads, patch staging, and approved verification through a short-lived loopback MCP connector. TrueForge loads selected tool definitions on demand, including Quick Edit’s source and symbol lookups. The host validates workspace trust and checks that the exact reviewed patch still matches the current source before applying. Agent Mode supports edits to existing files in one trusted local folder and verifies them using the configured pytest profile in a temporary snapshot.
+
+Agent Mode ranks source ranges by task terms, declarations, and related tests or documentation. Repository reads share an estimated 8,000-token budget by default. Only run the verification profile on a trusted project. Its tests run with your account's OS permissions.
 
 ## Project checks
 
